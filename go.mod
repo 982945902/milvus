@@ -22,7 +22,7 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware v1.3.0
 	github.com/klauspost/compress v1.17.7
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d
-	github.com/milvus-io/milvus-proto/go-api/v2 v2.3.4-0.20240815123953-6dab6fcd6454
+	github.com/milvus-io/milvus-proto/go-api/v2 v2.3.4-0.20240822040249-4bbc8f623cbb
 	github.com/minio/minio-go/v7 v7.0.61
 	github.com/pingcap/log v1.1.1-0.20221015072633-39906604fb81
 	github.com/prometheus/client_golang v1.14.0
@@ -242,6 +242,7 @@ require (
 )
 
 replace (
+	github.com/apache/arrow/go/v12 => github.com/milvus-io/arrow/go/v12 v12.0.1
 	github.com/apache/pulsar-client-go => github.com/milvus-io/pulsar-client-go v0.6.10
 	github.com/bketelsen/crypt => github.com/bketelsen/crypt v0.0.4 // Fix security alert for core-os/etcd
 	github.com/expr-lang/expr => github.com/SimFG/expr v0.0.0-20231218130003-94d085776dc5
