@@ -1095,6 +1095,10 @@ func (coord *RootCoordMock) AlterCollection(ctx context.Context, request *milvus
 	return &commonpb.Status{}, nil
 }
 
+func (coord *RootCoordMock) AlterCollectionField(ctx context.Context, request *milvuspb.AlterCollectionFieldRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return &commonpb.Status{}, nil
+}
+
 func (coord *RootCoordMock) CreateDatabase(ctx context.Context, in *milvuspb.CreateDatabaseRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	return &commonpb.Status{}, nil
 }
@@ -1131,6 +1135,22 @@ func (coord *RootCoordMock) BackupRBAC(ctx context.Context, in *milvuspb.BackupR
 }
 
 func (coord *RootCoordMock) RestoreRBAC(ctx context.Context, in *milvuspb.RestoreRBACMetaRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return &commonpb.Status{}, nil
+}
+
+func (coord *RootCoordMock) CreatePrivilegeGroup(ctx context.Context, req *milvuspb.CreatePrivilegeGroupRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return &commonpb.Status{}, nil
+}
+
+func (coord *RootCoordMock) DropPrivilegeGroup(ctx context.Context, req *milvuspb.DropPrivilegeGroupRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return &commonpb.Status{}, nil
+}
+
+func (coord *RootCoordMock) ListPrivilegeGroups(ctx context.Context, req *milvuspb.ListPrivilegeGroupsRequest, opts ...grpc.CallOption) (*milvuspb.ListPrivilegeGroupsResponse, error) {
+	return &milvuspb.ListPrivilegeGroupsResponse{}, nil
+}
+
+func (coord *RootCoordMock) OperatePrivilegeGroup(ctx context.Context, req *milvuspb.OperatePrivilegeGroupRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	return &commonpb.Status{}, nil
 }
 

@@ -17,6 +17,7 @@
 package balance
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -30,15 +31,18 @@ import (
 )
 
 type SegmentAssignPlan struct {
-	Segment *meta.Segment
-	Replica *meta.Replica
-	From    int64 // -1 if empty
-	To      int64
+	Segment      *meta.Segment
+	Replica      *meta.Replica
+	From         int64 // -1 if empty
+	To           int64
+	FromScore    int64
+	ToScore      int64
+	SegmentScore int64
 }
 
-func (segPlan *SegmentAssignPlan) ToString() string {
-	return fmt.Sprintf("SegmentPlan:[collectionID: %d, replicaID: %d, segmentID: %d, from: %d, to: %d]\n",
-		segPlan.Segment.CollectionID, segPlan.Replica.GetID(), segPlan.Segment.ID, segPlan.From, segPlan.To)
+func (segPlan *SegmentAssignPlan) String() string {
+	return fmt.Sprintf("SegmentPlan:[collectionID: %d, replicaID: %d, segmentID: %d, from: %d, to: %d, fromScore: %d, toScore: %d, segmentScore: %d]\n",
+		segPlan.Segment.CollectionID, segPlan.Replica.GetID(), segPlan.Segment.ID, segPlan.From, segPlan.To, segPlan.FromScore, segPlan.ToScore, segPlan.SegmentScore)
 }
 
 type ChannelAssignPlan struct {
@@ -48,15 +52,15 @@ type ChannelAssignPlan struct {
 	To      int64
 }
 
-func (chanPlan *ChannelAssignPlan) ToString() string {
+func (chanPlan *ChannelAssignPlan) String() string {
 	return fmt.Sprintf("ChannelPlan:[collectionID: %d, channel: %s, replicaID: %d, from: %d, to: %d]\n",
 		chanPlan.Channel.CollectionID, chanPlan.Channel.ChannelName, chanPlan.Replica.GetID(), chanPlan.From, chanPlan.To)
 }
 
 type Balance interface {
-	AssignSegment(collectionID int64, segments []*meta.Segment, nodes []int64, manualBalance bool) []SegmentAssignPlan
-	AssignChannel(channels []*meta.DmChannel, nodes []int64, manualBalance bool) []ChannelAssignPlan
-	BalanceReplica(replica *meta.Replica) ([]SegmentAssignPlan, []ChannelAssignPlan)
+	AssignSegment(ctx context.Context, collectionID int64, segments []*meta.Segment, nodes []int64, manualBalance bool) []SegmentAssignPlan
+	AssignChannel(ctx context.Context, collectionID int64, channels []*meta.DmChannel, nodes []int64, manualBalance bool) []ChannelAssignPlan
+	BalanceReplica(ctx context.Context, replica *meta.Replica) ([]SegmentAssignPlan, []ChannelAssignPlan)
 }
 
 type RoundRobinBalancer struct {
@@ -64,7 +68,7 @@ type RoundRobinBalancer struct {
 	nodeManager *session.NodeManager
 }
 
-func (b *RoundRobinBalancer) AssignSegment(collectionID int64, segments []*meta.Segment, nodes []int64, manualBalance bool) []SegmentAssignPlan {
+func (b *RoundRobinBalancer) AssignSegment(ctx context.Context, collectionID int64, segments []*meta.Segment, nodes []int64, manualBalance bool) []SegmentAssignPlan {
 	// skip out suspend node and stopping node during assignment, but skip this check for manual balance
 	if !manualBalance {
 		nodes = lo.Filter(nodes, func(node int64, _ int) bool {
@@ -100,7 +104,7 @@ func (b *RoundRobinBalancer) AssignSegment(collectionID int64, segments []*meta.
 	return ret
 }
 
-func (b *RoundRobinBalancer) AssignChannel(channels []*meta.DmChannel, nodes []int64, manualBalance bool) []ChannelAssignPlan {
+func (b *RoundRobinBalancer) AssignChannel(ctx context.Context, collectionID int64, channels []*meta.DmChannel, nodes []int64, manualBalance bool) []ChannelAssignPlan {
 	// skip out suspend node and stopping node during assignment, but skip this check for manual balance
 	if !manualBalance {
 		versionRangeFilter := semver.MustParseRange(">2.3.x")
@@ -133,9 +137,17 @@ func (b *RoundRobinBalancer) AssignChannel(channels []*meta.DmChannel, nodes []i
 	return ret
 }
 
-func (b *RoundRobinBalancer) BalanceReplica(replica *meta.Replica) ([]SegmentAssignPlan, []ChannelAssignPlan) {
+func (b *RoundRobinBalancer) BalanceReplica(ctx context.Context, replica *meta.Replica) ([]SegmentAssignPlan, []ChannelAssignPlan) {
 	// TODO by chun.han
 	return nil, nil
+}
+
+func (b *RoundRobinBalancer) permitBalanceChannel(collectionID int64) bool {
+	return b.scheduler.GetSegmentTaskNum(task.WithCollectionID2TaskFilter(collectionID), task.WithTaskTypeFilter(task.TaskTypeMove)) == 0
+}
+
+func (b *RoundRobinBalancer) permitBalanceSegment(collectionID int64) bool {
+	return b.scheduler.GetChannelTaskNum(task.WithCollectionID2TaskFilter(collectionID), task.WithTaskTypeFilter(task.TaskTypeMove)) == 0
 }
 
 func (b *RoundRobinBalancer) getNodes(nodes []int64) []*session.NodeInfo {

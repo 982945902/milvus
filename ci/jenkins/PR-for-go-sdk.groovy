@@ -1,4 +1,4 @@
-@Library('jenkins-shared-library@v0.40.0') _
+@Library('jenkins-shared-library@tekton') _
 
 def pod = libraryResource 'io/milvus/pod/tekton-4am.yaml'
 
@@ -11,12 +11,23 @@ pipeline {
         buildDiscarder logRotator(artifactDaysToKeepStr: '30')
         preserveStashes(buildCount: 5)
         disableConcurrentBuilds(abortPrevious: true)
+        timeout(time: 2, unit: 'HOURS')
+        throttleJobProperty(
+            categories: ['go-sdk'],
+            throttleEnabled: true,
+            throttleOption: 'category'
+
+        )
     }
     agent {
         kubernetes {
             cloud '4am'
             yaml pod
         }
+    }
+    environment {
+        LOKI_ADDR = 'http://loki-1-loki-distributed-gateway.loki.svc.cluster.local'
+        LOKI_CLIENT_RETRIES = 3
     }
     stages {
         stage('meta') {
@@ -46,6 +57,7 @@ pipeline {
                                               gitBaseRef: gitBaseRef,
                                               pullRequestNumber: "$env.CHANGE_ID",
                                               suppress_suffix_of_image_tag: true,
+                                              make_cmd: "make clean && make install use_disk_index=ON",
                                               images: '["milvus","gotestsum","helm"]'
 
                         milvus_image_tag = tekton.query_result job_name, 'milvus-image-tag'

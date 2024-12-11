@@ -107,7 +107,7 @@ func (t *createCollectionTask) validate() error {
 	if t.Req.GetNumPartitions() > 0 {
 		newPartNum = t.Req.GetNumPartitions()
 	}
-	return checkGeneralCapacity(t.ctx, 1, newPartNum, t.Req.GetShardsNum(), t.core, t.ts)
+	return checkGeneralCapacity(t.ctx, 1, newPartNum, t.Req.GetShardsNum(), t.core)
 }
 
 // checkMaxCollectionsPerDB DB properties take precedence over quota configurations for max collections.
@@ -153,44 +153,59 @@ func checkFieldSchema(schema *schemapb.CollectionSchema) error {
 			msg := fmt.Sprintf("vector type not support null, type:%s, name:%s", fieldSchema.GetDataType().String(), fieldSchema.GetName())
 			return merr.WrapErrParameterInvalidMsg(msg)
 		}
+		if fieldSchema.GetNullable() && fieldSchema.IsPrimaryKey {
+			msg := fmt.Sprintf("primary field not support null, type:%s, name:%s", fieldSchema.GetDataType().String(), fieldSchema.GetName())
+			return merr.WrapErrParameterInvalidMsg(msg)
+		}
 		if fieldSchema.GetDefaultValue() != nil {
+			if fieldSchema.IsPrimaryKey {
+				msg := fmt.Sprintf("primary field not support default_value, type:%s, name:%s", fieldSchema.GetDataType().String(), fieldSchema.GetName())
+				return merr.WrapErrParameterInvalidMsg(msg)
+			}
+			dtype := fieldSchema.GetDataType()
+			if dtype == schemapb.DataType_Array || dtype == schemapb.DataType_JSON || typeutil.IsVectorType(dtype) {
+				msg := fmt.Sprintf("type not support default_value, type:%s, name:%s", fieldSchema.GetDataType().String(), fieldSchema.GetName())
+				return merr.WrapErrParameterInvalidMsg(msg)
+			}
+			errTypeMismatch := func(fieldName, fieldType, defaultValueType string) error {
+				msg := fmt.Sprintf("type (%s) of field (%s) is not equal to the type(%s) of default_value", fieldType, fieldName, defaultValueType)
+				return merr.WrapErrParameterInvalidMsg(msg)
+			}
 			switch fieldSchema.GetDefaultValue().Data.(type) {
 			case *schemapb.ValueField_BoolData:
-				if fieldSchema.GetDataType() != schemapb.DataType_Bool {
-					return merr.WrapErrParameterInvalid("DataType_Bool", "not match", "default value type mismatches field schema type")
+				if dtype != schemapb.DataType_Bool {
+					return errTypeMismatch(fieldSchema.GetName(), dtype.String(), "DataType_Bool")
 				}
 			case *schemapb.ValueField_IntData:
-				if fieldSchema.GetDataType() != schemapb.DataType_Int32 &&
-					fieldSchema.GetDataType() != schemapb.DataType_Int16 &&
-					fieldSchema.GetDataType() != schemapb.DataType_Int8 {
-					return merr.WrapErrParameterInvalid("DataType_Int", "not match", "default value type mismatches field schema type")
+				if dtype != schemapb.DataType_Int32 && dtype != schemapb.DataType_Int16 && dtype != schemapb.DataType_Int8 {
+					return errTypeMismatch(fieldSchema.GetName(), dtype.String(), "DataType_Int")
 				}
 				defaultValue := fieldSchema.GetDefaultValue().GetIntData()
-				if fieldSchema.GetDataType() == schemapb.DataType_Int16 {
+				if dtype == schemapb.DataType_Int16 {
 					if defaultValue > math.MaxInt16 || defaultValue < math.MinInt16 {
 						return merr.WrapErrParameterInvalidRange(math.MinInt16, math.MaxInt16, defaultValue, "default value out of range")
 					}
 				}
-				if fieldSchema.GetDataType() == schemapb.DataType_Int8 {
+				if dtype == schemapb.DataType_Int8 {
 					if defaultValue > math.MaxInt8 || defaultValue < math.MinInt8 {
 						return merr.WrapErrParameterInvalidRange(math.MinInt8, math.MaxInt8, defaultValue, "default value out of range")
 					}
 				}
 			case *schemapb.ValueField_LongData:
-				if fieldSchema.GetDataType() != schemapb.DataType_Int64 {
-					return merr.WrapErrParameterInvalid("DataType_Int64", "not match", "default value type mismatches field schema type")
+				if dtype != schemapb.DataType_Int64 {
+					return errTypeMismatch(fieldSchema.GetName(), dtype.String(), "DataType_Int64")
 				}
 			case *schemapb.ValueField_FloatData:
-				if fieldSchema.GetDataType() != schemapb.DataType_Float {
-					return merr.WrapErrParameterInvalid("DataType_Float", "not match", "default value type mismatches field schema type")
+				if dtype != schemapb.DataType_Float {
+					return errTypeMismatch(fieldSchema.GetName(), dtype.String(), "DataType_Float")
 				}
 			case *schemapb.ValueField_DoubleData:
-				if fieldSchema.GetDataType() != schemapb.DataType_Double {
-					return merr.WrapErrParameterInvalid("DataType_Double", "not match", "default value type mismatches field schema type")
+				if dtype != schemapb.DataType_Double {
+					return errTypeMismatch(fieldSchema.GetName(), dtype.String(), "DataType_Double")
 				}
 			case *schemapb.ValueField_StringData:
-				if fieldSchema.GetDataType() != schemapb.DataType_VarChar {
-					return merr.WrapErrParameterInvalid("DataType_VarChar", "not match", "default value type mismatches field schema type")
+				if dtype != schemapb.DataType_VarChar {
+					return errTypeMismatch(fieldSchema.GetName(), dtype.String(), "DataType_VarChar")
 				}
 				maxLength, err := parameterutil.GetMaxLength(fieldSchema)
 				if err != nil {
@@ -251,10 +266,34 @@ func (t *createCollectionTask) validateSchema(schema *schemapb.CollectionSchema)
 	return validateFieldDataType(schema)
 }
 
-func (t *createCollectionTask) assignFieldID(schema *schemapb.CollectionSchema) {
-	for idx := range schema.GetFields() {
-		schema.Fields[idx].FieldID = int64(idx + StartOfUserFieldID)
+func (t *createCollectionTask) assignFieldAndFunctionID(schema *schemapb.CollectionSchema) error {
+	name2id := map[string]int64{}
+	for idx, field := range schema.GetFields() {
+		field.FieldID = int64(idx + StartOfUserFieldID)
+		name2id[field.GetName()] = field.GetFieldID()
 	}
+
+	for fidx, function := range schema.GetFunctions() {
+		function.InputFieldIds = make([]int64, len(function.InputFieldNames))
+		function.Id = int64(fidx) + StartOfUserFunctionID
+		for idx, name := range function.InputFieldNames {
+			fieldId, ok := name2id[name]
+			if !ok {
+				return fmt.Errorf("input field %s of function %s not found", name, function.GetName())
+			}
+			function.InputFieldIds[idx] = fieldId
+		}
+
+		function.OutputFieldIds = make([]int64, len(function.OutputFieldNames))
+		for idx, name := range function.OutputFieldNames {
+			fieldId, ok := name2id[name]
+			if !ok {
+				return fmt.Errorf("output field %s of function %s not found", name, function.GetName())
+			}
+			function.OutputFieldIds[idx] = fieldId
+		}
+	}
+	return nil
 }
 
 func (t *createCollectionTask) appendDynamicField(schema *schemapb.CollectionSchema) {
@@ -295,7 +334,11 @@ func (t *createCollectionTask) prepareSchema() error {
 		return err
 	}
 	t.appendDynamicField(&schema)
-	t.assignFieldID(&schema)
+
+	if err := t.assignFieldAndFunctionID(&schema); err != nil {
+		return err
+	}
+
 	t.appendSysFields(&schema)
 	t.schema = &schema
 	return nil
@@ -507,13 +550,6 @@ func (t *createCollectionTask) Execute(ctx context.Context) error {
 	vchanNames := t.channels.virtualChannels
 	chanNames := t.channels.physicalChannels
 
-	startPositions, err := t.addChannelsAndGetStartPositions(ctx, ts)
-	if err != nil {
-		// ugly here, since we must get start positions first.
-		t.core.chanTimeTick.removeDmlChannels(t.channels.physicalChannels...)
-		return err
-	}
-
 	partitions := make([]*model.Partition, len(partIDs))
 	for i, partID := range partIDs {
 		partitions[i] = &model.Partition{
@@ -532,11 +568,11 @@ func (t *createCollectionTask) Execute(ctx context.Context) error {
 		Description:          t.schema.Description,
 		AutoID:               t.schema.AutoID,
 		Fields:               model.UnmarshalFieldModels(t.schema.Fields),
+		Functions:            model.UnmarshalFunctionModels(t.schema.Functions),
 		VirtualChannelNames:  vchanNames,
 		PhysicalChannelNames: chanNames,
 		ShardsNum:            t.Req.ShardsNum,
 		ConsistencyLevel:     t.Req.ConsistencyLevel,
-		StartPositions:       toKeyDataPairs(startPositions),
 		CreateTime:           ts,
 		State:                pb.CollectionState_CollectionCreating,
 		Partitions:           partitions,
@@ -560,12 +596,22 @@ func (t *createCollectionTask) Execute(ctx context.Context) error {
 		return nil
 	}
 
+	// TODO: The create collection is not idempotent for other component, such as wal.
+	// we need to make the create collection operation must success after some persistent operation, refactor it in future.
+	startPositions, err := t.addChannelsAndGetStartPositions(ctx, ts)
+	if err != nil {
+		// ugly here, since we must get start positions first.
+		t.core.chanTimeTick.removeDmlChannels(t.channels.physicalChannels...)
+		return err
+	}
+	collInfo.StartPositions = toKeyDataPairs(startPositions)
+
 	undoTask := newBaseUndoTask(t.core.stepExecutor)
 	undoTask.AddStep(&expireCacheStep{
 		baseStep:        baseStep{core: t.core},
 		dbName:          t.Req.GetDbName(),
 		collectionNames: []string{t.Req.GetCollectionName()},
-		collectionID:    InvalidCollectionID,
+		collectionID:    collID,
 		ts:              ts,
 		opts:            []proxyutil.ExpireCacheOpt{proxyutil.SetMsgType(commonpb.MsgType_DropCollection)},
 	}, &nullStep{})
@@ -601,6 +647,7 @@ func (t *createCollectionTask) Execute(ctx context.Context) error {
 				Description: collInfo.Description,
 				AutoID:      collInfo.AutoID,
 				Fields:      model.MarshalFieldModels(collInfo.Fields),
+				Functions:   model.MarshalFunctionModels(collInfo.Functions),
 			},
 		},
 	}, &nullStep{})
@@ -612,4 +659,12 @@ func (t *createCollectionTask) Execute(ctx context.Context) error {
 	}, &nullStep{}) // We'll remove the whole collection anyway.
 
 	return undoTask.Execute(ctx)
+}
+
+func (t *createCollectionTask) GetLockerKey() LockerKey {
+	return NewLockerKeyChain(
+		NewClusterLockerKey(false),
+		NewDatabaseLockerKey(t.Req.GetDbName(), false),
+		NewCollectionLockerKey(t.Req.GetCollectionName(), true),
+	)
 }

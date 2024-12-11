@@ -18,16 +18,20 @@ package flusherimpl
 
 import (
 	"context"
+	"math"
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/errors"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/flushcommon/pipeline"
+	"github.com/milvus-io/milvus/internal/flushcommon/syncmgr"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/streamingnode/server/resource"
 	"github.com/milvus-io/milvus/internal/streamingnode/server/wal"
 	adaptor2 "github.com/milvus-io/milvus/internal/streamingnode/server/wal/adaptor"
+	"github.com/milvus-io/milvus/internal/streamingnode/server/wal/interceptors/segment/stats"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/streaming/util/message/adaptor"
 	"github.com/milvus-io/milvus/pkg/streaming/util/options"
@@ -39,8 +43,11 @@ type LifetimeState int
 const (
 	Pending LifetimeState = iota
 	Cancel
+	Fail
 	Done
 )
+
+var errChannelLifetimeUnrecoverable = errors.New("channel lifetime unrecoverable")
 
 type ChannelLifetime interface {
 	Run() error
@@ -71,6 +78,9 @@ func (c *channelLifetime) Run() error {
 	if c.state == Cancel || c.state == Done {
 		return nil
 	}
+	if c.state == Fail {
+		return errChannelLifetimeUnrecoverable
+	}
 	log.Info("start to build pipeline", zap.String("vchannel", c.vchannel))
 
 	// Get recovery info from datacoord.
@@ -81,6 +91,12 @@ func (c *channelLifetime) Run() error {
 	if err = merr.CheckRPCCall(resp, err); err != nil {
 		return err
 	}
+	// The channel has been dropped, skip to recover it.
+	if len(resp.GetInfo().GetSeekPosition().GetMsgID()) == 0 && resp.GetInfo().GetSeekPosition().GetTimestamp() == math.MaxUint64 {
+		log.Info("channel has been dropped, skip to create flusher for vchannel", zap.String("vchannel", c.vchannel))
+		c.state = Fail
+		return errChannelLifetimeUnrecoverable
+	}
 
 	// Convert common.MessageID to message.messageID.
 	messageID := adaptor.MustGetMessageIDFromMQWrapperIDBytes(c.wal.WALName(), resp.GetInfo().GetSeekPosition().GetMsgID())
@@ -89,10 +105,8 @@ func (c *channelLifetime) Run() error {
 	policy := options.DeliverPolicyStartFrom(messageID)
 	handler := adaptor2.NewMsgPackAdaptorHandler()
 	ro := wal.ReadOption{
-		DeliverPolicy: policy,
-		MessageFilter: []options.DeliverFilter{
-			options.DeliverFilterVChannel(c.vchannel),
-		},
+		VChannel:       c.vchannel,
+		DeliverPolicy:  policy,
 		MesasgeHandler: handler,
 	}
 	scanner, err := c.wal.Read(ctx, ro)
@@ -102,8 +116,22 @@ func (c *channelLifetime) Run() error {
 
 	// Build and add pipeline.
 	ds, err := pipeline.NewStreamingNodeDataSyncService(ctx, c.f.pipelineParams,
-		&datapb.ChannelWatchInfo{Vchan: resp.GetInfo(), Schema: resp.GetSchema()}, handler.Chan())
+		&datapb.ChannelWatchInfo{Vchan: resp.GetInfo(), Schema: resp.GetSchema()}, handler.Chan(), func(t syncmgr.Task, err error) {
+			if err != nil || t == nil {
+				return
+			}
+			if tt, ok := t.(*syncmgr.SyncTask); ok {
+				insertLogs, _, _ := tt.Binlogs()
+				resource.Resource().SegmentAssignStatsManager().UpdateOnSync(tt.SegmentID(), stats.SyncOperationMetrics{
+					BinLogCounterIncr:     1,
+					BinLogFileCounterIncr: uint64(len(insertLogs)),
+				})
+			}
+		},
+		func() { go func() { c.Cancel() }() },
+	)
 	if err != nil {
+		handler.Close()
 		return err
 	}
 	ds.Start()
@@ -121,7 +149,7 @@ func (c *channelLifetime) Cancel() {
 	switch c.state {
 	case Pending:
 		c.state = Cancel
-	case Cancel:
+	case Cancel, Fail:
 		return
 	case Done:
 		err := c.scanner.Close()

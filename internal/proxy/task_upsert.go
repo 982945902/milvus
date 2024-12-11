@@ -198,7 +198,7 @@ func (it *upsertTask) insertPreExecute(ctx context.Context) error {
 		return merr.WrapErrAsInputErrorWhen(err, merr.ErrParameterInvalid)
 	}
 	// set field ID to insert field data
-	err = fillFieldIDBySchema(it.upsertMsg.InsertMsg.GetFieldsData(), it.schema.CollectionSchema)
+	err = fillFieldPropertiesBySchema(it.upsertMsg.InsertMsg.GetFieldsData(), it.schema.CollectionSchema)
 	if err != nil {
 		log.Warn("insert set fieldID to fieldData failed when upsert",
 			zap.Error(err))
@@ -317,8 +317,12 @@ func (it *upsertTask) PreExecute(ctx context.Context) error {
 		// insert to _default partition
 		partitionTag := it.req.GetPartitionName()
 		if len(partitionTag) <= 0 {
-			partitionTag = Params.CommonCfg.DefaultPartitionName.GetValue()
-			it.req.PartitionName = partitionTag
+			pinfo, err := globalMetaCache.GetPartitionInfo(ctx, it.req.GetDbName(), collectionName, "")
+			if err != nil {
+				log.Warn("get partition info failed", zap.String("collectionName", collectionName), zap.Error(err))
+				return err
+			}
+			it.req.PartitionName = pinfo.name
 		}
 	}
 
@@ -389,7 +393,7 @@ func (it *upsertTask) insertExecute(ctx context.Context, msgPack *msgstream.MsgP
 		zap.Int64("collectionID", collID))
 	getCacheDur := tr.RecordSpan()
 
-	_, err = it.chMgr.getOrCreateDmlStream(collID)
+	_, err = it.chMgr.getOrCreateDmlStream(ctx, collID)
 	if err != nil {
 		return err
 	}
@@ -464,7 +468,7 @@ func (it *upsertTask) deleteExecute(ctx context.Context, msgPack *msgstream.MsgP
 		if !ok {
 			msgid, err := it.idAllocator.AllocOne()
 			if err != nil {
-				errors.Wrap(err, "failed to allocate MsgID for delete of upsert")
+				return errors.Wrap(err, "failed to allocate MsgID for delete of upsert")
 			}
 			sliceRequest := &msgpb.DeleteRequest{
 				Base: commonpbutil.NewMsgBase(
@@ -522,7 +526,7 @@ func (it *upsertTask) Execute(ctx context.Context) (err error) {
 	log := log.Ctx(ctx).With(zap.String("collectionName", it.req.CollectionName))
 
 	tr := timerecord.NewTimeRecorder(fmt.Sprintf("proxy execute upsert %d", it.ID()))
-	stream, err := it.chMgr.getOrCreateDmlStream(it.collectionID)
+	stream, err := it.chMgr.getOrCreateDmlStream(ctx, it.collectionID)
 	if err != nil {
 		return err
 	}
@@ -543,7 +547,7 @@ func (it *upsertTask) Execute(ctx context.Context) (err error) {
 	}
 
 	tr.RecordSpan()
-	err = stream.Produce(msgPack)
+	err = stream.Produce(ctx, msgPack)
 	if err != nil {
 		it.result.Status = merr.Status(err)
 		return err

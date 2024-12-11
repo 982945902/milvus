@@ -17,7 +17,6 @@ package querynodev2
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"math/rand"
 	"path"
@@ -38,6 +37,8 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/internal/json"
+	"github.com/milvus-io/milvus/internal/mocks/util/mock_segcore"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
@@ -69,9 +70,10 @@ type ServiceSuite struct {
 	schema         *schemapb.CollectionSchema
 	partitionIDs   []int64
 	// Test segments
-	validSegmentIDs   []int64
-	flushedSegmentIDs []int64
-	droppedSegmentIDs []int64
+	validSegmentIDs     []int64
+	flushedSegmentIDs   []int64
+	droppedSegmentIDs   []int64
+	levelZeroSegmentIDs []int64
 	// Test channel
 	vchannel string
 	pchannel string
@@ -94,15 +96,16 @@ func (suite *ServiceSuite) SetupSuite() {
 	// collection and segments data
 	// init param
 	paramtable.Init()
-	paramtable.Get().Save(paramtable.Get().QueryNodeCfg.GCEnabled.Key, "false")
+	paramtable.Get().Save(paramtable.Get().CommonCfg.GCEnabled.Key, "false")
 
 	suite.rootPath = suite.T().Name()
 	suite.collectionID = 111
 	suite.collectionName = "test-collection"
 	suite.partitionIDs = []int64{222}
 	suite.validSegmentIDs = []int64{1, 2, 3}
-	suite.flushedSegmentIDs = []int64{4, 5, 6}
+	suite.flushedSegmentIDs = []int64{5, 6}
 	suite.droppedSegmentIDs = []int64{7, 8, 9}
+	suite.levelZeroSegmentIDs = []int64{4}
 
 	var err error
 	suite.mapper = metautil.NewDynChannelMapper()
@@ -124,6 +127,7 @@ func (suite *ServiceSuite) SetupTest() {
 	suite.factory = dependency.NewMockFactory(suite.T())
 	suite.msgStream = msgstream.NewMockMsgStream(suite.T())
 	// TODO:: cpp chunk manager not support local chunk manager
+	paramtable.Get().Save(paramtable.Get().LocalStorageCfg.Path.Key, suite.T().TempDir())
 	// suite.chunkManagerFactory = storage.NewChunkManagerFactory("local", storage.RootPath("/tmp/milvus-test"))
 	suite.chunkManagerFactory = storage.NewTestChunkManagerFactory(paramtable.Get(), suite.rootPath)
 	suite.factory.EXPECT().Init(mock.Anything).Return()
@@ -168,9 +172,10 @@ func (suite *ServiceSuite) TearDownTest() {
 	})
 	suite.NoError(err)
 	suite.Equal(commonpb.ErrorCode_Success, resp.ErrorCode)
-	suite.node.chunkManager.RemoveWithPrefix(ctx, suite.rootPath)
+	suite.node.chunkManager.RemoveWithPrefix(ctx, paramtable.Get().LocalStorageCfg.Path.GetValue())
 	suite.node.Stop()
 	suite.etcdClient.Close()
+	paramtable.Get().Reset(paramtable.Get().LocalStorageCfg.Path.Key)
 }
 
 func (suite *ServiceSuite) TestGetComponentStatesNormal() {
@@ -258,8 +263,8 @@ func (suite *ServiceSuite) TestWatchDmChannelsInt64() {
 	ctx := context.Background()
 
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
-	deltaLogs, err := segments.SaveDeltaLog(suite.collectionID,
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	deltaLogs, err := mock_segcore.SaveDeltaLog(suite.collectionID,
 		suite.partitionIDs[0],
 		suite.flushedSegmentIDs[0],
 		suite.node.chunkManager,
@@ -277,16 +282,17 @@ func (suite *ServiceSuite) TestWatchDmChannelsInt64() {
 		PartitionIDs: suite.partitionIDs,
 		Infos: []*datapb.VchannelInfo{
 			{
-				CollectionID:      suite.collectionID,
-				ChannelName:       suite.vchannel,
-				SeekPosition:      suite.position,
-				FlushedSegmentIds: suite.flushedSegmentIDs,
-				DroppedSegmentIds: suite.droppedSegmentIDs,
+				CollectionID:        suite.collectionID,
+				ChannelName:         suite.vchannel,
+				SeekPosition:        suite.position,
+				FlushedSegmentIds:   suite.flushedSegmentIDs,
+				DroppedSegmentIds:   suite.droppedSegmentIDs,
+				LevelZeroSegmentIds: suite.levelZeroSegmentIDs,
 			},
 		},
 		SegmentInfos: map[int64]*datapb.SegmentInfo{
-			suite.flushedSegmentIDs[0]: {
-				ID:            suite.flushedSegmentIDs[0],
+			suite.levelZeroSegmentIDs[0]: {
+				ID:            suite.levelZeroSegmentIDs[0],
 				CollectionID:  suite.collectionID,
 				PartitionID:   suite.partitionIDs[0],
 				InsertChannel: suite.vchannel,
@@ -301,7 +307,7 @@ func (suite *ServiceSuite) TestWatchDmChannelsInt64() {
 			PartitionIDs: suite.partitionIDs,
 			MetricType:   defaultMetricType,
 		},
-		IndexInfoList: segments.GenTestIndexInfoList(suite.collectionID, schema),
+		IndexInfoList: mock_segcore.GenTestIndexInfoList(suite.collectionID, schema),
 	}
 
 	// mocks
@@ -326,7 +332,7 @@ func (suite *ServiceSuite) TestWatchDmChannelsVarchar() {
 	ctx := context.Background()
 
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_VarChar, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_VarChar, false)
 
 	req := &querypb.WatchDmChannelsRequest{
 		Base: &commonpb.MsgBase{
@@ -353,7 +359,7 @@ func (suite *ServiceSuite) TestWatchDmChannelsVarchar() {
 			PartitionIDs: suite.partitionIDs,
 			MetricType:   defaultMetricType,
 		},
-		IndexInfoList: segments.GenTestIndexInfoList(suite.collectionID, schema),
+		IndexInfoList: mock_segcore.GenTestIndexInfoList(suite.collectionID, schema),
 	}
 
 	// mocks
@@ -378,9 +384,9 @@ func (suite *ServiceSuite) TestWatchDmChannels_Failed() {
 	ctx := context.Background()
 
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 
-	indexInfos := segments.GenTestIndexInfoList(suite.collectionID, schema)
+	indexInfos := mock_segcore.GenTestIndexInfoList(suite.collectionID, schema)
 
 	infos := suite.genSegmentLoadInfos(schema, indexInfos)
 	segmentInfos := lo.SliceToMap(infos, func(info *querypb.SegmentLoadInfo) (int64, *datapb.SegmentInfo) {
@@ -539,7 +545,7 @@ func (suite *ServiceSuite) genSegmentLoadInfos(schema *schemapb.CollectionSchema
 	partNum := len(suite.partitionIDs)
 	infos := make([]*querypb.SegmentLoadInfo, 0)
 	for i := 0; i < segNum; i++ {
-		binlogs, statslogs, err := segments.SaveBinLog(ctx,
+		binlogs, statslogs, err := mock_segcore.SaveBinLog(ctx,
 			suite.collectionID,
 			suite.partitionIDs[i%partNum],
 			suite.validSegmentIDs[i],
@@ -554,7 +560,7 @@ func (suite *ServiceSuite) genSegmentLoadInfos(schema *schemapb.CollectionSchema
 		for offset, field := range vectorFieldSchemas {
 			indexInfo := lo.FindOrElse(indexInfos, nil, func(info *indexpb.IndexInfo) bool { return info.FieldID == field.GetFieldID() })
 			if indexInfo != nil {
-				index, err := segments.GenAndSaveIndexV2(
+				index, err := mock_segcore.GenAndSaveIndexV2(
 					suite.collectionID,
 					suite.partitionIDs[i%partNum],
 					suite.validSegmentIDs[i],
@@ -590,8 +596,8 @@ func (suite *ServiceSuite) TestLoadSegments_Int64() {
 	ctx := context.Background()
 	suite.TestWatchDmChannelsInt64()
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
-	indexInfos := segments.GenTestIndexInfoList(suite.collectionID, schema)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	indexInfos := mock_segcore.GenTestIndexInfoList(suite.collectionID, schema)
 	infos := suite.genSegmentLoadInfos(schema, indexInfos)
 	for _, info := range infos {
 		req := &querypb.LoadSegmentsRequest{
@@ -619,7 +625,7 @@ func (suite *ServiceSuite) TestLoadSegments_VarChar() {
 	ctx := context.Background()
 	suite.TestWatchDmChannelsVarchar()
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_VarChar, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_VarChar, false)
 	loadMeta := &querypb.LoadMetaInfo{
 		LoadType:     querypb.LoadType_LoadCollection,
 		CollectionID: suite.collectionID,
@@ -656,7 +662,7 @@ func (suite *ServiceSuite) TestLoadDeltaInt64() {
 	ctx := context.Background()
 	suite.TestLoadSegments_Int64()
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 	req := &querypb.LoadSegmentsRequest{
 		Base: &commonpb.MsgBase{
 			MsgID:    rand.Int63(),
@@ -681,7 +687,7 @@ func (suite *ServiceSuite) TestLoadDeltaVarchar() {
 	ctx := context.Background()
 	suite.TestLoadSegments_VarChar()
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 	req := &querypb.LoadSegmentsRequest{
 		Base: &commonpb.MsgBase{
 			MsgID:    rand.Int63(),
@@ -706,9 +712,9 @@ func (suite *ServiceSuite) TestLoadIndex_Success() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 
-	indexInfos := segments.GenTestIndexInfoList(suite.collectionID, schema)
+	indexInfos := mock_segcore.GenTestIndexInfoList(suite.collectionID, schema)
 	infos := suite.genSegmentLoadInfos(schema, indexInfos)
 	infos = lo.Map(infos, func(info *querypb.SegmentLoadInfo, _ int) *querypb.SegmentLoadInfo {
 		info.SegmentID = info.SegmentID + 1000
@@ -777,10 +783,10 @@ func (suite *ServiceSuite) TestLoadIndex_Failed() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 
 	suite.Run("load_non_exist_segment", func() {
-		indexInfos := segments.GenTestIndexInfoList(suite.collectionID, schema)
+		indexInfos := mock_segcore.GenTestIndexInfoList(suite.collectionID, schema)
 		infos := suite.genSegmentLoadInfos(schema, indexInfos)
 		infos = lo.Map(infos, func(info *querypb.SegmentLoadInfo, _ int) *querypb.SegmentLoadInfo {
 			info.SegmentID = info.SegmentID + 1000
@@ -823,7 +829,7 @@ func (suite *ServiceSuite) TestLoadIndex_Failed() {
 
 		mockLoader.EXPECT().LoadIndex(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(errors.New("mocked error"))
 
-		indexInfos := segments.GenTestIndexInfoList(suite.collectionID, schema)
+		indexInfos := mock_segcore.GenTestIndexInfoList(suite.collectionID, schema)
 		infos := suite.genSegmentLoadInfos(schema, indexInfos)
 		req := &querypb.LoadSegmentsRequest{
 			Base: &commonpb.MsgBase{
@@ -849,7 +855,7 @@ func (suite *ServiceSuite) TestLoadIndex_Failed() {
 func (suite *ServiceSuite) TestLoadSegments_Failed() {
 	ctx := context.Background()
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 	req := &querypb.LoadSegmentsRequest{
 		Base: &commonpb.MsgBase{
 			MsgID:    rand.Int63(),
@@ -896,7 +902,7 @@ func (suite *ServiceSuite) TestLoadSegments_Transfer() {
 		delegator.EXPECT().TryCleanExcludedSegments(mock.Anything).Maybe()
 		delegator.EXPECT().LoadSegments(mock.Anything, mock.AnythingOfType("*querypb.LoadSegmentsRequest")).Return(nil)
 		// data
-		schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+		schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 		req := &querypb.LoadSegmentsRequest{
 			Base: &commonpb.MsgBase{
 				MsgID:    rand.Int63(),
@@ -918,7 +924,7 @@ func (suite *ServiceSuite) TestLoadSegments_Transfer() {
 
 	suite.Run("delegator_not_found", func() {
 		// data
-		schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+		schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 		req := &querypb.LoadSegmentsRequest{
 			Base: &commonpb.MsgBase{
 				MsgID:    rand.Int63(),
@@ -948,7 +954,7 @@ func (suite *ServiceSuite) TestLoadSegments_Transfer() {
 		delegator.EXPECT().LoadSegments(mock.Anything, mock.AnythingOfType("*querypb.LoadSegmentsRequest")).
 			Return(errors.New("mocked error"))
 		// data
-		schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+		schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 		req := &querypb.LoadSegmentsRequest{
 			Base: &commonpb.MsgBase{
 				MsgID:    rand.Int63(),
@@ -1156,8 +1162,22 @@ func (suite *ServiceSuite) TestGetSegmentInfo_Failed() {
 	suite.Equal(commonpb.ErrorCode_NotReadyServe, rsp.GetStatus().GetErrorCode())
 }
 
+func (suite *ServiceSuite) syncDistribution(ctx context.Context) {
+	suite.node.SyncDistribution(ctx, &querypb.SyncDistributionRequest{
+		Channel:      suite.vchannel,
+		CollectionID: suite.collectionID,
+		LoadMeta: &querypb.LoadMetaInfo{
+			CollectionID: suite.collectionID,
+			PartitionIDs: suite.partitionIDs,
+		},
+		Actions: []*querypb.SyncAction{
+			{Type: querypb.SyncType_UpdateVersion, SealedInTarget: suite.validSegmentIDs, TargetVersion: time.Now().UnixNano()},
+		},
+	})
+}
+
 // Test Search
-func (suite *ServiceSuite) genCSearchRequest(nq int64, dataType schemapb.DataType, fieldID int64, metricType string) (*internalpb.SearchRequest, error) {
+func (suite *ServiceSuite) genCSearchRequest(nq int64, dataType schemapb.DataType, fieldID int64, metricType string, isTopkReduce bool) (*internalpb.SearchRequest, error) {
 	placeHolder, err := genPlaceHolderGroup(nq)
 	if err != nil {
 		return nil, err
@@ -1181,6 +1201,7 @@ func (suite *ServiceSuite) genCSearchRequest(nq int64, dataType schemapb.DataTyp
 		DslType:            commonpb.DslType_BoolExprV1,
 		Nq:                 nq,
 		MvccTimestamp:      typeutil.MaxTimestamp,
+		IsTopkReduce:       isTopkReduce,
 	}, nil
 }
 
@@ -1189,8 +1210,9 @@ func (suite *ServiceSuite) TestSearch_Normal() {
 	// pre
 	suite.TestWatchDmChannelsInt64()
 	suite.TestLoadSegments_Int64()
+	suite.syncDistribution(ctx)
 
-	creq, err := suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, defaultMetricType)
+	creq, err := suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, defaultMetricType, false)
 	req := &querypb.SearchRequest{
 		Req: creq,
 
@@ -1209,12 +1231,13 @@ func (suite *ServiceSuite) TestSearch_Concurrent() {
 	// pre
 	suite.TestWatchDmChannelsInt64()
 	suite.TestLoadSegments_Int64()
+	suite.syncDistribution(ctx)
 
 	concurrency := 16
 	futures := make([]*conc.Future[*internalpb.SearchResults], 0, concurrency)
 	for i := 0; i < concurrency; i++ {
 		future := conc.Go(func() (*internalpb.SearchResults, error) {
-			creq, err := suite.genCSearchRequest(30, schemapb.DataType_FloatVector, 107, defaultMetricType)
+			creq, err := suite.genCSearchRequest(30, schemapb.DataType_FloatVector, 107, defaultMetricType, false)
 			req := &querypb.SearchRequest{
 				Req: creq,
 
@@ -1239,8 +1262,8 @@ func (suite *ServiceSuite) TestSearch_Failed() {
 	ctx := context.Background()
 
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
-	creq, err := suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, "invalidMetricType")
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	creq, err := suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, "invalidMetricType", false)
 	req := &querypb.SearchRequest{
 		Req: creq,
 
@@ -1261,7 +1284,7 @@ func (suite *ServiceSuite) TestSearch_Failed() {
 		CollectionID: suite.collectionID,
 		PartitionIDs: suite.partitionIDs,
 	}
-	indexMeta := suite.node.composeIndexMeta(segments.GenTestIndexInfoList(suite.collectionID, schema), schema)
+	indexMeta := suite.node.composeIndexMeta(mock_segcore.GenTestIndexInfoList(suite.collectionID, schema), schema)
 	suite.node.manager.Collection.PutOrRef(suite.collectionID, schema, indexMeta, LoadMeta)
 
 	// Delegator not found
@@ -1271,6 +1294,7 @@ func (suite *ServiceSuite) TestSearch_Failed() {
 
 	suite.TestWatchDmChannelsInt64()
 	suite.TestLoadSegments_Int64()
+	// suite.syncDistribution(ctx)
 
 	// sync segment data
 	syncReq := &querypb.SyncDistributionRequest{
@@ -1280,6 +1304,10 @@ func (suite *ServiceSuite) TestSearch_Failed() {
 		},
 		CollectionID: suite.collectionID,
 		Channel:      suite.vchannel,
+		LoadMeta: &querypb.LoadMetaInfo{
+			CollectionID: suite.collectionID,
+			PartitionIDs: suite.partitionIDs,
+		},
 	}
 
 	syncVersionAction := &querypb.SyncAction{
@@ -1319,6 +1347,7 @@ func (suite *ServiceSuite) TestSearchSegments_Unhealthy() {
 
 	rsp, err := suite.node.SearchSegments(ctx, req)
 	suite.NoError(err)
+	suite.Equal(false, rsp.GetIsTopkReduce())
 	suite.Equal(commonpb.ErrorCode_NotReadyServe, rsp.GetStatus().GetErrorCode())
 	suite.Equal(merr.Code(merr.ErrServiceNotReady), rsp.GetStatus().GetCode())
 }
@@ -1338,6 +1367,7 @@ func (suite *ServiceSuite) TestSearchSegments_Failed() {
 
 	rsp, err := suite.node.SearchSegments(ctx, req)
 	suite.NoError(err)
+	suite.Equal(false, rsp.GetIsTopkReduce())
 	suite.Equal(commonpb.ErrorCode_UnexpectedError, rsp.GetStatus().GetErrorCode())
 	suite.Equal(merr.Code(merr.ErrCollectionNotLoaded), rsp.GetStatus().GetCode())
 
@@ -1358,7 +1388,7 @@ func (suite *ServiceSuite) TestSearchSegments_Normal() {
 	suite.TestWatchDmChannelsInt64()
 	suite.TestLoadSegments_Int64()
 
-	creq, err := suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, defaultMetricType)
+	creq, err := suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, defaultMetricType, false)
 	req := &querypb.SearchRequest{
 		Req: creq,
 
@@ -1369,6 +1399,14 @@ func (suite *ServiceSuite) TestSearchSegments_Normal() {
 
 	rsp, err := suite.node.SearchSegments(ctx, req)
 	suite.NoError(err)
+	suite.Equal(rsp.GetIsTopkReduce(), false)
+	suite.Equal(commonpb.ErrorCode_Success, rsp.GetStatus().GetErrorCode())
+
+	req.Req, err = suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, defaultMetricType, true)
+	suite.NoError(err)
+	rsp, err = suite.node.SearchSegments(ctx, req)
+	suite.NoError(err)
+	suite.Equal(rsp.GetIsTopkReduce(), true)
 	suite.Equal(commonpb.ErrorCode_Success, rsp.GetStatus().GetErrorCode())
 }
 
@@ -1378,7 +1416,7 @@ func (suite *ServiceSuite) TestStreamingSearch() {
 	suite.TestWatchDmChannelsInt64()
 	suite.TestLoadSegments_Int64()
 	paramtable.Get().Save(paramtable.Get().QueryNodeCfg.UseStreamComputing.Key, "true")
-	creq, err := suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, defaultMetricType)
+	creq, err := suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, defaultMetricType, false)
 	req := &querypb.SearchRequest{
 		Req:             creq,
 		FromShardLeader: true,
@@ -1391,6 +1429,7 @@ func (suite *ServiceSuite) TestStreamingSearch() {
 
 	rsp, err := suite.node.SearchSegments(ctx, req)
 	suite.NoError(err)
+	suite.Equal(false, rsp.GetIsTopkReduce())
 	suite.Equal(commonpb.ErrorCode_Success, rsp.GetStatus().GetErrorCode())
 }
 
@@ -1399,7 +1438,7 @@ func (suite *ServiceSuite) TestStreamingSearchGrowing() {
 	// pre
 	suite.TestWatchDmChannelsInt64()
 	paramtable.Get().Save(paramtable.Get().QueryNodeCfg.UseStreamComputing.Key, "true")
-	creq, err := suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, defaultMetricType)
+	creq, err := suite.genCSearchRequest(10, schemapb.DataType_FloatVector, 107, defaultMetricType, false)
 	req := &querypb.SearchRequest{
 		Req:             creq,
 		FromShardLeader: true,
@@ -1440,9 +1479,10 @@ func (suite *ServiceSuite) TestQuery_Normal() {
 	// pre
 	suite.TestWatchDmChannelsInt64()
 	suite.TestLoadSegments_Int64()
+	suite.syncDistribution(ctx)
 
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 	creq, err := suite.genCQueryRequest(10, IndexFaissIDMap, schema)
 	suite.NoError(err)
 	req := &querypb.QueryRequest{
@@ -1461,7 +1501,7 @@ func (suite *ServiceSuite) TestQuery_Failed() {
 	defer cancel()
 
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 	creq, err := suite.genCQueryRequest(10, IndexFaissIDMap, schema)
 	suite.NoError(err)
 	req := &querypb.QueryRequest{
@@ -1521,9 +1561,10 @@ func (suite *ServiceSuite) TestQueryStream_Normal() {
 	// prepare
 	suite.TestWatchDmChannelsInt64()
 	suite.TestLoadSegments_Int64()
+	suite.syncDistribution(ctx)
 
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 	creq, err := suite.genCQueryRequest(10, IndexFaissIDMap, schema)
 	suite.NoError(err)
 	req := &querypb.QueryRequest{
@@ -1558,7 +1599,7 @@ func (suite *ServiceSuite) TestQueryStream_Failed() {
 	defer cancel()
 
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 	creq, err := suite.genCQueryRequest(10, IndexFaissIDMap, schema)
 	suite.NoError(err)
 	req := &querypb.QueryRequest{
@@ -1636,7 +1677,7 @@ func (suite *ServiceSuite) TestQuerySegments_Normal() {
 	suite.TestLoadSegments_Int64()
 
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 	creq, err := suite.genCQueryRequest(10, IndexFaissIDMap, schema)
 	suite.NoError(err)
 	req := &querypb.QueryRequest{
@@ -1658,7 +1699,7 @@ func (suite *ServiceSuite) TestQueryStreamSegments_Normal() {
 	suite.TestLoadSegments_Int64()
 
 	// data
-	schema := segments.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
+	schema := mock_segcore.GenTestCollectionSchema(suite.collectionName, schemapb.DataType_Int64, false)
 	creq, err := suite.genCQueryRequest(10, IndexFaissIDMap, schema)
 	suite.NoError(err)
 	req := &querypb.QueryRequest{
@@ -1736,22 +1777,37 @@ func (suite *ServiceSuite) TestShowConfigurations_Failed() {
 
 func (suite *ServiceSuite) TestGetMetric_Normal() {
 	ctx := context.Background()
-	metricReq := make(map[string]string)
-	metricReq[metricsinfo.MetricTypeKey] = metricsinfo.SystemInfoMetrics
-	mReq, err := json.Marshal(metricReq)
+	req, err := metricsinfo.ConstructRequestByMetricType(metricsinfo.SystemInfoMetrics)
 	suite.NoError(err)
 
-	req := &milvuspb.GetMetricsRequest{
-		Base: &commonpb.MsgBase{
-			MsgID:    rand.Int63(),
-			TargetID: suite.node.session.ServerID,
-		},
-		Request: string(mReq),
-	}
+	sd1 := delegator.NewMockShardDelegator(suite.T())
+	sd1.EXPECT().Collection().Return(100)
+	sd1.EXPECT().GetDeleteBufferSize().Return(10, 1000)
+	sd1.EXPECT().Close().Maybe()
+	suite.node.delegators.Insert("qn_unitest_dml_0_100v0", sd1)
+	defer suite.node.delegators.GetAndRemove("qn_unitest_dml_0_100v0")
+
+	sd2 := delegator.NewMockShardDelegator(suite.T())
+	sd2.EXPECT().Collection().Return(100)
+	sd2.EXPECT().GetDeleteBufferSize().Return(10, 1000)
+	sd2.EXPECT().Close().Maybe()
+	suite.node.delegators.Insert("qn_unitest_dml_1_100v1", sd2)
+	defer suite.node.delegators.GetAndRemove("qn_unitest_dml_1_100v1")
 
 	resp, err := suite.node.GetMetrics(ctx, req)
+	err = merr.CheckRPCCall(resp, err)
 	suite.NoError(err)
-	suite.Equal(commonpb.ErrorCode_Success, resp.GetStatus().GetErrorCode())
+
+	info := &metricsinfo.QueryNodeInfos{}
+	err = metricsinfo.UnmarshalComponentInfos(resp.GetResponse(), info)
+	suite.NoError(err)
+
+	entryNum, ok := info.QuotaMetrics.DeleteBufferInfo.CollectionDeleteBufferNum[100]
+	suite.True(ok)
+	suite.EqualValues(20, entryNum)
+	memorySize, ok := info.QuotaMetrics.DeleteBufferInfo.CollectionDeleteBufferSize[100]
+	suite.True(ok)
+	suite.EqualValues(2000, memorySize)
 }
 
 func (suite *ServiceSuite) TestGetMetric_Failed() {
@@ -1773,7 +1829,7 @@ func (suite *ServiceSuite) TestGetMetric_Failed() {
 	resp, err := suite.node.GetMetrics(ctx, req)
 	suite.NoError(err)
 	err = merr.Error(resp.GetStatus())
-	suite.ErrorIs(err, merr.ErrMetricNotFound)
+	suite.Contains(err.Error(), metricsinfo.MsgUnimplementedMetric)
 
 	// metric parse failed
 	req.Request = "---"
@@ -1894,6 +1950,7 @@ func (suite *ServiceSuite) TestSyncDistribution_Normal() {
 			return nil
 		})
 	suite.node.delegators.Insert(testChannel, mockDelegator)
+	defer suite.node.delegators.GetAndRemove(testChannel)
 
 	status, err = suite.node.SyncDistribution(ctx, req)
 	suite.NoError(err)

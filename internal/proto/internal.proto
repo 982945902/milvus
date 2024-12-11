@@ -4,6 +4,7 @@ option go_package = "github.com/milvus-io/milvus/internal/proto/internalpb";
 
 import "common.proto";
 import "schema.proto";
+import "milvus.proto";
 
 message GetTimeTickChannelRequest {
 }
@@ -94,11 +95,9 @@ message SubSearchRequest {
   int64  topk = 7;
   int64 offset = 8;
   string metricType = 9;
-}
-
-message ExtraSearchParam {
-  int64 group_by_field_id = 1;
-  int64 group_size = 2;
+  int64 group_by_field_id = 10;
+  int64 group_size = 11;
+  int64 field_id = 12;
 }
 
 message SearchRequest {
@@ -125,7 +124,10 @@ message SearchRequest {
   bool   is_advanced = 20;
   int64 offset = 21;
   common.ConsistencyLevel consistency_level = 22;
-  ExtraSearchParam extra_search_param = 23;
+  int64 group_by_field_id = 23;
+  int64 group_size = 24;
+  int64 field_id = 25;
+  bool is_topk_reduce = 26;
 }
 
 message SubSearchResults {
@@ -161,6 +163,7 @@ message SearchResults {
   repeated SubSearchResults sub_results = 15;
   bool is_advanced = 16;
   int64 all_search_count = 17;
+  bool is_topk_reduce = 18;
 }
 
 message CostAggregation {
@@ -186,9 +189,9 @@ message RetrieveRequest {
   bool is_count = 13;
   int64 iteration_extension_reduce_rate = 14;
   string username = 15;
-  bool reduce_stop_for_best = 16;
+  bool reduce_stop_for_best = 16; //deprecated
+  int32 reduce_type = 17;
 }
-
 
 
 message RetrieveResults {
@@ -261,6 +264,7 @@ message ListPolicyResponse {
   common.Status status = 1;
   repeated string policy_infos = 2;
   repeated string user_roles = 3;
+  repeated milvus.PrivilegeGroupInfo privilege_groups = 4;
 }
 
 message ShowConfigurationsRequest {
@@ -306,6 +310,8 @@ enum ImportJobState {
   Importing = 3;
   Failed = 4;
   Completed = 5;
+  IndexBuilding = 6;
+  Stats = 7;
 }
 
 message ImportFile {

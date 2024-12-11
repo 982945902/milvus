@@ -71,21 +71,24 @@ func (pi *ParamItem) getWithRaw() (result, raw string, err error) {
 	}
 	// raw value set only once
 	raw, err = pi.manager.GetConfig(pi.Key)
-	if err != nil {
+	if err != nil || raw == pi.DefaultValue {
+		// try fallback if the entry is not exist or default value,
+		//  because default value may already defined in milvus.yaml
+		//	and we don't want the fallback keys be overridden.
 		for _, key := range pi.FallbackKeys {
-			// set result value here, since value comes from different key
-			result, err = pi.manager.GetConfig(key)
+			var fallbackRaw string
+			fallbackRaw, err = pi.manager.GetConfig(key)
 			if err == nil {
+				raw = fallbackRaw
 				break
 			}
 		}
-	} else {
-		result = raw
 	}
 	if err != nil {
 		// use default value
-		result = pi.DefaultValue
+		raw = pi.DefaultValue
 	}
+	result = raw
 	if pi.Formatter != nil {
 		result = pi.Formatter(result)
 	}
@@ -311,6 +314,7 @@ type ParamGroup struct {
 	Export    bool
 
 	GetFunc func() map[string]string
+	DocFunc func(string) string
 
 	manager *config.Manager
 }
@@ -325,6 +329,13 @@ func (pg *ParamGroup) GetValue() map[string]string {
 	}
 	values := pg.manager.GetBy(config.WithPrefix(pg.KeyPrefix), config.RemovePrefix(pg.KeyPrefix))
 	return values
+}
+
+func (pg *ParamGroup) GetDoc(key string) string {
+	if pg.DocFunc != nil {
+		return pg.DocFunc(key)
+	}
+	return ""
 }
 
 func ParseAsStings(v string) []string {

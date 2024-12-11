@@ -19,10 +19,12 @@ package datanode
 import (
 	"context"
 
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus/internal/flushcommon/util"
+	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/util/hardware"
-	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/ratelimitutil"
@@ -66,26 +68,35 @@ func (node *DataNode) getQuotaMetrics() (*metricsinfo.DataNodeQuotaMetrics, erro
 	}, nil
 }
 
-func (node *DataNode) getSystemInfoMetrics(_ context.Context, _ *milvuspb.GetMetricsRequest) (*milvuspb.GetMetricsResponse, error) {
+func (node *DataNode) getSystemInfoMetrics(ctx context.Context, _ *milvuspb.GetMetricsRequest) (string, error) {
 	// TODO(dragondriver): add more metrics
 	usedMem := hardware.GetUsedMemoryCount()
 	totalMem := hardware.GetMemoryCount()
 
 	quotaMetrics, err := node.getQuotaMetrics()
 	if err != nil {
-		return &milvuspb.GetMetricsResponse{
-			Status:        merr.Status(err),
-			ComponentName: metricsinfo.ConstructComponentName(typeutil.DataNodeRole, paramtable.GetNodeID()),
-		}, nil
+		return "", err
 	}
+
+	used, total, err := hardware.GetDiskUsage(paramtable.Get().LocalStorageCfg.Path.GetValue())
+	if err != nil {
+		log.Ctx(ctx).Warn("get disk usage failed", zap.Error(err))
+	}
+
+	ioWait, err := hardware.GetIOWait()
+	if err != nil {
+		log.Ctx(ctx).Warn("get iowait failed", zap.Error(err))
+	}
+
 	hardwareMetrics := metricsinfo.HardwareMetrics{
-		IP:           node.session.Address,
-		CPUCoreCount: hardware.GetCPUNum(),
-		CPUCoreUsage: hardware.GetCPUUsage(),
-		Memory:       totalMem,
-		MemoryUsage:  usedMem,
-		Disk:         hardware.GetDiskCount(),
-		DiskUsage:    hardware.GetDiskUsage(),
+		IP:               node.session.Address,
+		CPUCoreCount:     hardware.GetCPUNum(),
+		CPUCoreUsage:     hardware.GetCPUUsage(),
+		Memory:           totalMem,
+		MemoryUsage:      usedMem,
+		Disk:             total,
+		DiskUsage:        used,
+		IOWaitPercentage: ioWait,
 	}
 	quotaMetrics.Hms = hardwareMetrics
 
@@ -106,19 +117,5 @@ func (node *DataNode) getSystemInfoMetrics(_ context.Context, _ *milvuspb.GetMet
 	}
 
 	metricsinfo.FillDeployMetricsWithEnv(&nodeInfos.SystemInfo)
-
-	resp, err := metricsinfo.MarshalComponentInfos(nodeInfos)
-	if err != nil {
-		return &milvuspb.GetMetricsResponse{
-			Status:        merr.Status(err),
-			Response:      "",
-			ComponentName: metricsinfo.ConstructComponentName(typeutil.DataNodeRole, paramtable.GetNodeID()),
-		}, nil
-	}
-
-	return &milvuspb.GetMetricsResponse{
-		Status:        merr.Success(),
-		Response:      resp,
-		ComponentName: metricsinfo.ConstructComponentName(typeutil.DataNodeRole, paramtable.GetNodeID()),
-	}, nil
+	return metricsinfo.MarshalComponentInfos(nodeInfos)
 }

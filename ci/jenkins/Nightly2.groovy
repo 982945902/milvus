@@ -1,4 +1,4 @@
-@Library('jenkins-shared-library@v0.40.0') _
+@Library('jenkins-shared-library@tekton') _
 
 def pod = libraryResource 'io/milvus/pod/tekton-4am.yaml'
 
@@ -8,7 +8,7 @@ String cron_string = BRANCH_NAME == 'master' ? '50 1 * * * ' : ''
 // Make timeout 4 hours so that we can run two nightly during the ci
 int total_timeout_minutes = 7 * 60
 
-def milvus_helm_chart_version = '4.2.8'
+def milvus_helm_chart_version = '4.2.18'
 
 pipeline {
     triggers {
@@ -29,6 +29,12 @@ pipeline {
             yaml pod
         }
     }
+
+    environment {
+        LOKI_ADDR = 'http://loki-1-loki-distributed-gateway.loki.svc.cluster.local'
+        LOKI_CLIENT_RETRIES = 3
+    }
+
     stages {
         stage('meta') {
             steps {
@@ -50,14 +56,15 @@ pipeline {
             steps {
                 container('tkn') {
                     script {
-
                         def job_name = tekton.run arch: 'amd64',
                                               isPr: isPr,
                                               gitMode: gitMode ,
                                               gitBaseRef: gitBaseRef,
                                               pullRequestNumber: "$env.CHANGE_ID",
                                               suppress_suffix_of_image_tag: true,
-                                              images: '["milvus","pytest","helm"]'
+                                              make_cmd: "make clean && make install use_disk_index=ON",
+                                              images: '["milvus","pytest","helm"]',
+                                              tekton_log_timeout: '30m'
 
                         milvus_image_tag = tekton.query_result job_name, 'milvus-image-tag'
                         pytest_image =  tekton.query_result job_name, 'pytest-image-fqdn'
@@ -80,6 +87,9 @@ pipeline {
                 agent {
                     kubernetes {
                         cloud '4am'
+                        // 'milvus' template defined a ephemeral volume used for pytest result archiving
+                        // pvc name would be <pod-name>-volume-0
+                        inheritFrom 'milvus'
                         yaml pod
                     }
                 }
@@ -95,14 +105,18 @@ pipeline {
                             container('tkn') {
                                 script {
                                     def helm_release_name =  get_helm_release_name milvus_deployment_option
+                                    // pvc name would be <pod-name>-volume-0, used for pytest result archiving
+                                    def pvc = env.JENKINS_AGENT_NAME + '-volume-0'
 
                                     tekton.pytest helm_release_name: helm_release_name,
+                                              pvc: pvc,
                                               milvus_helm_version: milvus_helm_chart_version,
                                               ciMode: 'nightly',
                                               milvus_image_tag: milvus_image_tag,
                                               pytest_image: pytest_image,
                                               helm_image: helm_image,
                                               milvus_deployment_option: milvus_deployment_option,
+                                              tekton_log_timeout: '30m',
                                               verbose: 'false'
                                 }
                             }
@@ -126,9 +140,23 @@ pipeline {
                                                                      build_id: env.BUILD_ID
                                     }
                                 }
+                                container('jnlp') {
+                                    script {
+                                        tekton.archive_pytest_logs(milvus_deployment_option)
+                                    }
+                                }
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+    post {
+        unsuccessful {
+            container('jnlp') {
+                script {
+                    sendEmail.toQA()
                 }
             }
         }

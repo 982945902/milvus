@@ -31,34 +31,33 @@ func (dt *deleteTaskByStreamingService) Execute(ctx context.Context) (err error)
 
 	dt.tr = timerecord.NewTimeRecorder(fmt.Sprintf("proxy execute delete %d", dt.ID()))
 	result, numRows, err := repackDeleteMsgByHash(
-		ctx,
-		dt.primaryKeys,
-		dt.vChannels,
-		dt.idAllocator,
-		dt.ts,
-		dt.collectionID,
+		ctx, dt.primaryKeys,
+		dt.vChannels, dt.idAllocator,
+		dt.ts, dt.collectionID,
 		dt.req.GetCollectionName(),
-		dt.partitionID,
-		dt.req.GetPartitionName(),
+		dt.partitionID, dt.req.GetPartitionName(),
+		dt.req.GetDbName(),
 	)
 	if err != nil {
 		return err
 	}
 
 	var msgs []message.MutableMessage
-	for hashKey, deleteMsg := range result {
+	for hashKey, deleteMsgs := range result {
 		vchannel := dt.vChannels[hashKey]
-		msg, err := message.NewDeleteMessageBuilderV1().
-			WithHeader(&message.DeleteMessageHeader{
-				CollectionId: dt.collectionID,
-			}).
-			WithBody(deleteMsg.DeleteRequest).
-			WithVChannel(vchannel).
-			BuildMutable()
-		if err != nil {
-			return err
+		for _, deleteMsg := range deleteMsgs {
+			msg, err := message.NewDeleteMessageBuilderV1().
+				WithHeader(&message.DeleteMessageHeader{
+					CollectionId: dt.collectionID,
+				}).
+				WithBody(deleteMsg.DeleteRequest).
+				WithVChannel(vchannel).
+				BuildMutable()
+			if err != nil {
+				return err
+			}
+			msgs = append(msgs, msg)
 		}
-		msgs = append(msgs, msg)
 	}
 
 	log.Debug("send delete request to virtual channels",

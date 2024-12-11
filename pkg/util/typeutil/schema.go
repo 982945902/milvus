@@ -196,6 +196,8 @@ func CalcColumnSize(column *schemapb.FieldData) int {
 		for _, str := range column.GetScalars().GetJsonData().GetData() {
 			res += len(str)
 		}
+	default:
+		panic("Unknown data type:" + column.Type.String())
 	}
 	return res
 }
@@ -244,6 +246,8 @@ func EstimateEntitySize(fieldsData []*schemapb.FieldData, rowOffset int) (int, e
 			// counting only the size of the vector data, ignoring other
 			// bytes used in proto.
 			res += len(vec.Contents[rowOffset])
+		default:
+			panic("Unknown data type:" + fs.GetType().String())
 		}
 	}
 	return res, nil
@@ -429,6 +433,35 @@ func (helper *SchemaHelper) GetVectorDimFromID(fieldID int64) (int, error) {
 	return 0, fmt.Errorf("fieldID(%d) not has dim", fieldID)
 }
 
+func (helper *SchemaHelper) GetFunctionByOutputField(field *schemapb.FieldSchema) (*schemapb.FunctionSchema, error) {
+	for _, function := range helper.schema.GetFunctions() {
+		for _, id := range function.GetOutputFieldIds() {
+			if field.GetFieldID() == id {
+				return function, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("function not exist")
+}
+
+// As of now, only BM25 function output field is not supported to retrieve raw field data
+func (helper *SchemaHelper) CanRetrieveRawFieldData(field *schemapb.FieldSchema) bool {
+	if !field.IsFunctionOutput {
+		return true
+	}
+
+	f, err := helper.GetFunctionByOutputField(field)
+	if err != nil {
+		return false
+	}
+
+	return f.GetType() != schemapb.FunctionType_BM25
+}
+
+func (helper *SchemaHelper) GetCollectionName() string {
+	return helper.schema.Name
+}
+
 func IsBinaryVectorType(dataType schemapb.DataType) bool {
 	return dataType == schemapb.DataType_BinaryVector
 }
@@ -462,6 +495,10 @@ func IsSparseFloatVectorType(dataType schemapb.DataType) bool {
 
 func IsFloatVectorType(dataType schemapb.DataType) bool {
 	return IsDenseFloatVectorType(dataType) || IsSparseFloatVectorType(dataType)
+}
+
+func IsFixDimVectorType(dataType schemapb.DataType) bool {
+	return IsBinaryVectorType(dataType) || IsDenseFloatVectorType(dataType)
 }
 
 // IsVectorType returns true if input is a vector type, otherwise false
@@ -521,6 +558,15 @@ func IsStringType(dataType schemapb.DataType) bool {
 	default:
 		return false
 	}
+}
+
+func IsArrayContainStringElementType(dataType schemapb.DataType, elementType schemapb.DataType) bool {
+	if IsArrayType(dataType) {
+		if elementType == schemapb.DataType_String || elementType == schemapb.DataType_VarChar {
+			return true
+		}
+	}
+	return false
 }
 
 func IsVariableDataType(dataType schemapb.DataType) bool {
@@ -932,7 +978,9 @@ func MergeFieldData(dst []*schemapb.FieldData, src []*schemapb.FieldData) error 
 				dst = append(dst, scalarFieldData)
 				fieldID2Data[srcFieldData.FieldId] = scalarFieldData
 			}
-			dstScalar := fieldID2Data[srcFieldData.FieldId].GetScalars()
+			fieldData := fieldID2Data[srcFieldData.FieldId]
+			fieldData.ValidData = append(fieldData.ValidData, srcFieldData.GetValidData()...)
+			dstScalar := fieldData.GetScalars()
 			switch srcScalar := fieldType.Scalars.Data.(type) {
 			case *schemapb.ScalarField_BoolData:
 				if dstScalar.GetBoolData() == nil {
@@ -1246,6 +1294,44 @@ func AppendSystemFields(schema *schemapb.CollectionSchema) *schemapb.CollectionS
 		DataType:     schemapb.DataType_Int64,
 	})
 	return newSchema
+}
+
+func GetId(src *schemapb.IDs, idx int) (int, any) {
+	switch src.IdField.(type) {
+	case *schemapb.IDs_IntId:
+		return 8, src.GetIntId().Data[idx]
+	case *schemapb.IDs_StrId:
+		return len(src.GetStrId().Data[idx]), src.GetStrId().Data[idx]
+	default:
+		panic("unknown pk type")
+	}
+}
+
+func AppendID(dst *schemapb.IDs, src any) {
+	switch value := src.(type) {
+	case int64:
+		if dst.GetIdField() == nil {
+			dst.IdField = &schemapb.IDs_IntId{
+				IntId: &schemapb.LongArray{
+					Data: []int64{value},
+				},
+			}
+		} else {
+			dst.GetIntId().Data = append(dst.GetIntId().Data, value)
+		}
+	case string:
+		if dst.GetIdField() == nil {
+			dst.IdField = &schemapb.IDs_StrId{
+				StrId: &schemapb.StringArray{
+					Data: []string{value},
+				},
+			}
+		} else {
+			dst.GetStrId().Data = append(dst.GetStrId().Data, value)
+		}
+	default:
+		// TODO
+	}
 }
 
 func AppendIDs(dst *schemapb.IDs, src *schemapb.IDs, idx int) {
@@ -1675,6 +1761,18 @@ func SortSparseFloatRow(indices []uint32, values []float32) ([]uint32, []float32
 	}
 
 	return sortedIndices, sortedValues
+}
+
+func CreateAndSortSparseFloatRow(sparse map[uint32]float32) []byte {
+	row := make([]byte, len(sparse)*8)
+	data := lo.MapToSlice(sparse, func(indices uint32, value float32) Pair[uint32, float32] {
+		return Pair[uint32, float32]{indices, value}
+	})
+	sort.Slice(data, func(i, j int) bool { return data[i].A < data[j].A })
+	for i := 0; i < len(data); i++ {
+		SparseFloatRowSetAt(row, i, data[i].A, data[i].B)
+	}
+	return row
 }
 
 func CreateSparseFloatRow(indices []uint32, values []float32) []byte {

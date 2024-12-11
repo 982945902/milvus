@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -27,6 +29,7 @@ import (
 	"github.com/blang/semver/v4"
 	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
+	"github.com/tidwall/gjson"
 	"github.com/tikv/client-go/v2/txnkv"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/atomic"
@@ -40,6 +43,7 @@ import (
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/kv/querycoord"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/querycoordv2/balance"
 	"github.com/milvus-io/milvus/internal/querycoordv2/checkers"
 	"github.com/milvus-io/milvus/internal/querycoordv2/dist"
@@ -50,10 +54,12 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/session"
 	"github.com/milvus-io/milvus/internal/querycoordv2/task"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/componentutil"
 	"github.com/milvus-io/milvus/internal/util/proxyutil"
 	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/config"
 	"github.com/milvus-io/milvus/pkg/kv"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
@@ -130,6 +136,8 @@ type Server struct {
 	proxyCreator       proxyutil.ProxyCreator
 	proxyWatcher       proxyutil.ProxyWatcherInterface
 	proxyClientManager proxyutil.ProxyClientManagerInterface
+
+	metricsRequest *metricsinfo.MetricsRequest
 }
 
 func NewQueryCoord(ctx context.Context) (*Server, error) {
@@ -140,6 +148,7 @@ func NewQueryCoord(ctx context.Context) (*Server, error) {
 		nodeUpEventChan: make(chan int64, 10240),
 		notifyNodeUp:    make(chan struct{}),
 		balancerMap:     make(map[string]balance.Balance),
+		metricsRequest:  metricsinfo.NewMetricsRequest(),
 	}
 	server.UpdateStateCode(commonpb.StateCode_Abnormal)
 	server.queryNodeCreator = session.DefaultQueryNodeCreator
@@ -182,10 +191,64 @@ func (s *Server) initSession() error {
 	return nil
 }
 
+func (s *Server) registerMetricsRequest() {
+	getSystemInfoAction := func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
+		return s.getSystemInfoMetrics(ctx, req)
+	}
+
+	QueryTasksAction := func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
+		return s.taskScheduler.GetTasksJSON(), nil
+	}
+
+	QueryDistAction := func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
+		return s.dist.GetDistributionJSON(), nil
+	}
+
+	QueryTargetAction := func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
+		scope := meta.CurrentTarget
+		v := jsonReq.Get(metricsinfo.MetricRequestParamTargetScopeKey)
+		if v.Exists() {
+			scope = meta.TargetScope(v.Int())
+		}
+		return s.targetMgr.GetTargetJSON(ctx, scope), nil
+	}
+
+	QueryReplicasAction := func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
+		return s.meta.GetReplicasJSON(ctx), nil
+	}
+
+	QueryResourceGroupsAction := func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
+		return s.meta.GetResourceGroupsJSON(ctx), nil
+	}
+
+	QuerySegmentsAction := func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
+		return s.getSegmentsJSON(ctx, req, jsonReq)
+	}
+
+	QueryChannelsAction := func(ctx context.Context, req *milvuspb.GetMetricsRequest, jsonReq gjson.Result) (string, error) {
+		return s.getChannelsFromQueryNode(ctx, req)
+	}
+
+	// register actions that requests are processed in querycoord
+	s.metricsRequest.RegisterMetricsRequest(metricsinfo.SystemInfoMetrics, getSystemInfoAction)
+	s.metricsRequest.RegisterMetricsRequest(metricsinfo.AllTaskKey, QueryTasksAction)
+	s.metricsRequest.RegisterMetricsRequest(metricsinfo.DistKey, QueryDistAction)
+	s.metricsRequest.RegisterMetricsRequest(metricsinfo.TargetKey, QueryTargetAction)
+	s.metricsRequest.RegisterMetricsRequest(metricsinfo.ReplicaKey, QueryReplicasAction)
+	s.metricsRequest.RegisterMetricsRequest(metricsinfo.ResourceGroupKey, QueryResourceGroupsAction)
+
+	// register actions that requests are processed in querynode
+	s.metricsRequest.RegisterMetricsRequest(metricsinfo.SegmentKey, QuerySegmentsAction)
+	s.metricsRequest.RegisterMetricsRequest(metricsinfo.ChannelKey, QueryChannelsAction)
+	log.Info("register metrics actions finished")
+}
+
 func (s *Server) Init() error {
 	log.Info("QueryCoord start init",
 		zap.String("meta-root-path", Params.EtcdCfg.MetaRootPath.GetValue()),
 		zap.String("address", s.address))
+
+	s.registerMetricsRequest()
 
 	if err := s.initSession(); err != nil {
 		return err
@@ -214,6 +277,22 @@ func (s *Server) Init() error {
 }
 
 func (s *Server) initQueryCoord() error {
+	// wait for master init or healthy
+	log.Info("QueryCoord try to wait for RootCoord ready")
+	if err := componentutil.WaitForComponentHealthy(s.ctx, s.rootCoord, "RootCoord", 1000000, time.Millisecond*200); err != nil {
+		log.Error("QueryCoord wait for RootCoord ready failed", zap.Error(err))
+		return errors.Wrap(err, "RootCoord not ready")
+	}
+	log.Info("QueryCoord report RootCoord ready")
+
+	// wait for master init or healthy
+	log.Info("QueryCoord try to wait for DataCoord ready")
+	if err := componentutil.WaitForComponentHealthy(s.ctx, s.dataCoord, "DataCoord", 1000000, time.Millisecond*200); err != nil {
+		log.Error("QueryCoord wait for DataCoord ready failed", zap.Error(err))
+		return errors.Wrap(err, "DataCoord not ready")
+	}
+	log.Info("QueryCoord report DataCoord ready")
+
 	s.UpdateStateCode(commonpb.StateCode_Initializing)
 	log.Info("start init querycoord", zap.Any("State", commonpb.StateCode_Initializing))
 	// Init KV and ID allocator
@@ -280,16 +359,6 @@ func (s *Server) initQueryCoord() error {
 	s.proxyWatcher.DelSessionFunc(s.proxyClientManager.DelProxyClient)
 	log.Info("init proxy manager done")
 
-	// Init heartbeat
-	log.Info("init dist controller")
-	s.distController = dist.NewDistController(
-		s.cluster,
-		s.nodeMgr,
-		s.dist,
-		s.targetMgr,
-		s.taskScheduler,
-	)
-
 	// Init checker controller
 	log.Info("init checker controller")
 	s.getBalancerFunc = func() balance.Balance {
@@ -335,6 +404,20 @@ func (s *Server) initQueryCoord() error {
 	// Init observers
 	s.initObserver()
 
+	// Init heartbeat
+	syncTargetVersionFn := func(collectionID int64) {
+		s.targetObserver.TriggerUpdateCurrentTarget(collectionID)
+	}
+	log.Info("init dist controller")
+	s.distController = dist.NewDistController(
+		s.cluster,
+		s.nodeMgr,
+		s.dist,
+		s.targetMgr,
+		s.taskScheduler,
+		syncTargetVersionFn,
+	)
+
 	// Init load status cache
 	meta.GlobalFailedLoadCache = meta.NewFailedLoadCache()
 
@@ -355,26 +438,26 @@ func (s *Server) initMeta() error {
 	)
 
 	log.Info("recover meta...")
-	err := s.meta.CollectionManager.Recover(s.broker)
+	err := s.meta.CollectionManager.Recover(s.ctx, s.broker)
 	if err != nil {
 		log.Warn("failed to recover collections", zap.Error(err))
 		return err
 	}
-	collections := s.meta.GetAll()
+	collections := s.meta.GetAll(s.ctx)
 	log.Info("recovering collections...", zap.Int64s("collections", collections))
 
 	// We really update the metric after observers think the collection loaded.
 	metrics.QueryCoordNumCollections.WithLabelValues().Set(0)
 
-	metrics.QueryCoordNumPartitions.WithLabelValues().Set(float64(len(s.meta.GetAllPartitions())))
+	metrics.QueryCoordNumPartitions.WithLabelValues().Set(float64(len(s.meta.GetAllPartitions(s.ctx))))
 
-	err = s.meta.ReplicaManager.Recover(collections)
+	err = s.meta.ReplicaManager.Recover(s.ctx, collections)
 	if err != nil {
 		log.Warn("failed to recover replicas", zap.Error(err))
 		return err
 	}
 
-	err = s.meta.ResourceManager.Recover()
+	err = s.meta.ResourceManager.Recover(s.ctx)
 	if err != nil {
 		log.Warn("failed to recover resource groups", zap.Error(err))
 		return err
@@ -386,7 +469,7 @@ func (s *Server) initMeta() error {
 		LeaderViewManager:  meta.NewLeaderViewManager(),
 	}
 	s.targetMgr = meta.NewTargetManager(s.broker, s.meta)
-	err = s.targetMgr.Recover(s.store)
+	err = s.targetMgr.Recover(s.ctx, s.store)
 	if err != nil {
 		log.Warn("failed to recover collection targets", zap.Error(err))
 	}
@@ -403,6 +486,7 @@ func (s *Server) initObserver() {
 		s.dist,
 		s.broker,
 		s.cluster,
+		s.nodeMgr,
 	)
 	s.collectionObserver = observers.NewCollectionObserver(
 		s.dist,
@@ -450,6 +534,7 @@ func (s *Server) startQueryCoord() error {
 			Address:  node.Address,
 			Hostname: node.HostName,
 			Version:  node.Version,
+			Labels:   node.GetServerLabel(),
 		}))
 		s.taskScheduler.AddExecutor(node.ServerID)
 
@@ -465,6 +550,9 @@ func (s *Server) startQueryCoord() error {
 	s.wg.Add(2)
 	go s.handleNodeUpLoop()
 	go s.watchNodes(revision)
+
+	// watch load config changes
+	s.watchLoadConfigChanges()
 
 	// check whether old node exist, if yes suspend auto balance until all old nodes down
 	s.updateBalanceConfigLoop(s.ctx)
@@ -538,7 +626,7 @@ func (s *Server) Stop() error {
 	// save target to meta store, after querycoord restart, make it fast to recover current target
 	// should save target after target observer stop, incase of target changed
 	if s.targetMgr != nil {
-		s.targetMgr.SaveCurrentTarget(s.store)
+		s.targetMgr.SaveCurrentTarget(s.ctx, s.store)
 	}
 
 	if s.replicaObserver != nil {
@@ -685,6 +773,7 @@ func (s *Server) watchNodes(revision int64) {
 					Address:  addr,
 					Hostname: event.Session.HostName,
 					Version:  event.Session.Version,
+					Labels:   event.Session.GetServerLabel(),
 				}))
 				s.nodeUpEventChan <- nodeID
 				select {
@@ -701,7 +790,7 @@ func (s *Server) watchNodes(revision int64) {
 				)
 				s.nodeMgr.Stopping(nodeID)
 				s.checkerController.Check()
-				s.meta.ResourceManager.HandleNodeStopping(nodeID)
+				s.meta.ResourceManager.HandleNodeStopping(context.Background(), nodeID)
 
 			case sessionutil.SessionDelEvent:
 				nodeID := event.Session.ServerID
@@ -761,7 +850,7 @@ func (s *Server) handleNodeUp(node int64) {
 	s.taskScheduler.AddExecutor(node)
 	s.distController.StartDistInstance(s.ctx, node)
 	// need assign to new rg and replica
-	s.meta.ResourceManager.HandleNodeUp(node)
+	s.meta.ResourceManager.HandleNodeUp(s.ctx, node)
 }
 
 func (s *Server) handleNodeDown(node int64) {
@@ -776,18 +865,18 @@ func (s *Server) handleNodeDown(node int64) {
 	// Clear tasks
 	s.taskScheduler.RemoveByNode(node)
 
-	s.meta.ResourceManager.HandleNodeDown(node)
+	s.meta.ResourceManager.HandleNodeDown(context.Background(), node)
 }
 
 func (s *Server) checkNodeStateInRG() {
-	for _, rgName := range s.meta.ListResourceGroups() {
-		rg := s.meta.ResourceManager.GetResourceGroup(rgName)
+	for _, rgName := range s.meta.ListResourceGroups(s.ctx) {
+		rg := s.meta.ResourceManager.GetResourceGroup(s.ctx, rgName)
 		for _, node := range rg.GetNodes() {
 			info := s.nodeMgr.Get(node)
 			if info == nil {
-				s.meta.ResourceManager.HandleNodeDown(node)
+				s.meta.ResourceManager.HandleNodeDown(context.Background(), node)
 			} else if info.IsStoppingState() {
-				s.meta.ResourceManager.HandleNodeStopping(node)
+				s.meta.ResourceManager.HandleNodeStopping(context.Background(), node)
 			}
 		}
 	}
@@ -839,4 +928,63 @@ func (s *Server) updateBalanceConfig() bool {
 	Params.Save(Params.QueryCoordCfg.AutoBalance.Key, "false")
 	log.RatedDebug(10, "old query node exist", zap.Strings("sessions", lo.Keys(sessions)))
 	return false
+}
+
+func (s *Server) watchLoadConfigChanges() {
+	replicaNumHandler := config.NewHandler("watchReplicaNumberChanges", func(e *config.Event) {
+		log.Info("watch load config changes", zap.String("key", e.Key), zap.String("value", e.Value), zap.String("type", e.EventType))
+
+		collectionIDs := s.meta.GetAll(s.ctx)
+		if len(collectionIDs) == 0 {
+			log.Warn("no collection loaded, skip to trigger update load config")
+			return
+		}
+
+		replicaNum, err := strconv.ParseInt(e.Value, 10, 64)
+		if err != nil {
+			log.Warn("invalid cluster level load config, skip it", zap.String("key", e.Key), zap.String("value", e.Value))
+			return
+		}
+		if replicaNum <= 0 {
+			log.Info("invalid cluster level load config, skip it", zap.Int64("replica_num", replicaNum))
+			return
+		}
+		rgs := paramtable.Get().QueryCoordCfg.ClusterLevelLoadResourceGroups.GetAsStrings()
+
+		s.UpdateLoadConfig(s.ctx, &querypb.UpdateLoadConfigRequest{
+			CollectionIDs:  collectionIDs,
+			ReplicaNumber:  int32(replicaNum),
+			ResourceGroups: rgs,
+		})
+	})
+	paramtable.Get().Watch(paramtable.Get().QueryCoordCfg.ClusterLevelLoadReplicaNumber.Key, replicaNumHandler)
+
+	rgHandler := config.NewHandler("watchResourceGroupChanges", func(e *config.Event) {
+		log.Info("watch load config changes", zap.String("key", e.Key), zap.String("value", e.Value), zap.String("type", e.EventType))
+		collectionIDs := s.meta.GetAll(s.ctx)
+		if len(collectionIDs) == 0 {
+			log.Warn("no collection loaded, skip to trigger update load config")
+			return
+		}
+
+		if len(e.Value) == 0 {
+			log.Warn("invalid cluster level load config, skip it", zap.String("key", e.Key), zap.String("value", e.Value))
+			return
+		}
+
+		rgs := strings.Split(e.Value, ",")
+		rgs = lo.Map(rgs, func(rg string, _ int) string { return strings.TrimSpace(rg) })
+		if len(rgs) == 0 {
+			log.Info("invalid cluster level load config, skip it", zap.Strings("resource_groups", rgs))
+			return
+		}
+
+		replicaNum := paramtable.Get().QueryCoordCfg.ClusterLevelLoadReplicaNumber.GetAsInt64()
+		s.UpdateLoadConfig(s.ctx, &querypb.UpdateLoadConfigRequest{
+			CollectionIDs:  collectionIDs,
+			ReplicaNumber:  int32(replicaNum),
+			ResourceGroups: rgs,
+		})
+	})
+	paramtable.Get().Watch(paramtable.Get().QueryCoordCfg.ClusterLevelLoadResourceGroups.Key, rgHandler)
 }

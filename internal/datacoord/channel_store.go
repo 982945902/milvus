@@ -17,6 +17,7 @@
 package datacoord
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strconv"
@@ -74,6 +75,8 @@ type RWChannelStore interface {
 	UpdateState(isSuccessful bool, channels ...RWChannel)
 	// SegLegacyChannelByNode is used by StateChannelStore only
 	SetLegacyChannelByNode(nodeIDs ...int64)
+
+	HasChannel(channel string) bool
 }
 
 // ChannelOpTypeNames implements zap log marshaller for ChannelOpSet.
@@ -332,7 +335,7 @@ func NewStateChannelStore(kv kv.TxnKV) *StateChannelStore {
 
 func (c *StateChannelStore) Reload() error {
 	record := timerecord.NewTimeRecorder("datacoord")
-	keys, values, err := c.store.LoadWithPrefix(Params.CommonCfg.DataCoordWatchSubPath.GetValue())
+	keys, values, err := c.store.LoadWithPrefix(context.TODO(), Params.CommonCfg.DataCoordWatchSubPath.GetValue())
 	if err != nil {
 		return err
 	}
@@ -545,10 +548,7 @@ func (c *StateChannelStore) updateMetaMemoryForSingleOp(op *ChannelOp) error {
 				storedChannel.setState(ToWatch)
 			}
 		case Delete: // Remove Channel
-			// if not Delete from bufferID, remove from channel
-			if op.NodeID != bufferID {
-				c.removeAssignment(op.NodeID, ch.GetName())
-			}
+			c.removeAssignment(op.NodeID, ch.GetName())
 		default:
 			log.Error("unknown opType in updateMetaMemoryForSingleOp", zap.Any("type", op.Type))
 		}
@@ -593,7 +593,7 @@ func (c *StateChannelStore) txn(opSet *ChannelOpSet) error {
 		saves = lo.Assign(opSaves, saves)
 		removals = append(removals, opRemovals...)
 	}
-	return c.store.MultiSaveAndRemove(saves, removals)
+	return c.store.MultiSaveAndRemove(context.TODO(), saves, removals)
 }
 
 func (c *StateChannelStore) RemoveNode(nodeID int64) {
@@ -736,5 +736,5 @@ func (c *StateChannelStore) GetNodes() []int64 {
 // remove deletes kv pairs from the kv store where keys have given nodeID as prefix.
 func (c *StateChannelStore) remove(nodeID int64) error {
 	k := buildKeyPrefix(nodeID)
-	return c.store.RemoveWithPrefix(k)
+	return c.store.RemoveWithPrefix(context.TODO(), k)
 }

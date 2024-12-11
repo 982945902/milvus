@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/tidwall/gjson"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -236,7 +237,8 @@ func (i *IndexNode) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequ
 	}
 	defer i.lifetime.Done()
 
-	metricType, err := metricsinfo.ParseMetricType(req.GetRequest())
+	ret := gjson.Parse(req.GetRequest())
+	metricType, err := metricsinfo.ParseMetricRequestType(ret)
 	if err != nil {
 		log.Ctx(ctx).Warn("IndexNode.GetMetrics failed to parse metric type",
 			zap.Int64("nodeID", paramtable.GetNodeID()),
@@ -379,6 +381,7 @@ func (i *IndexNode) CreateJobV2(ctx context.Context, req *workerpb.CreateJobV2Re
 			zap.Int64("partitionID", statsRequest.GetPartitionID()),
 			zap.Int64("segmentID", statsRequest.GetSegmentID()),
 			zap.Int64("targetSegmentID", statsRequest.GetTargetSegmentID()),
+			zap.String("subJobType", statsRequest.GetSubJobType().String()),
 			zap.Int64("startLogID", statsRequest.GetStartLogID()),
 			zap.Int64("endLogID", statsRequest.GetEndLogID()),
 		)
@@ -512,8 +515,8 @@ func (i *IndexNode) QueryJobsV2(ctx context.Context, req *workerpb.QueryJobsV2Re
 					Channel:       info.insertChannel,
 					InsertLogs:    info.insertLogs,
 					StatsLogs:     info.statsLogs,
-					DeltaLogs:     nil,
 					TextStatsLogs: info.textStatsLogs,
+					Bm25Logs:      info.bm25Logs,
 					NumRows:       info.numRows,
 				})
 			}

@@ -43,7 +43,7 @@ SegmentGrowingImpl::PreInsert(int64_t size) {
 }
 
 void
-SegmentGrowingImpl::mask_with_delete(BitsetType& bitset,
+SegmentGrowingImpl::mask_with_delete(BitsetTypeView& bitset,
                                      int64_t ins_barrier,
                                      Timestamp timestamp) const {
     auto del_barrier = get_barrier(get_deleted_record(), timestamp);
@@ -139,6 +139,34 @@ SegmentGrowingImpl::Insert(int64_t reserved_offset,
                 field_id,
                 &insert_record_proto->fields_data(data_offset),
                 insert_record_);
+        }
+
+        // index text.
+        if (field_meta.enable_match()) {
+            // TODO: iterate texts and call `AddText` instead of `AddTexts`. This may cost much more memory.
+            std::vector<std::string> texts(
+                insert_record_proto->fields_data(data_offset)
+                    .scalars()
+                    .string_data()
+                    .data()
+                    .begin(),
+                insert_record_proto->fields_data(data_offset)
+                    .scalars()
+                    .string_data()
+                    .data()
+                    .end());
+            FixedVector<bool> texts_valid_data(
+                insert_record_proto->fields_data(data_offset)
+                    .valid_data()
+                    .begin(),
+                insert_record_proto->fields_data(data_offset)
+                    .valid_data()
+                    .end());
+            AddTexts(field_id,
+                     texts.data(),
+                     texts_valid_data.data(),
+                     num_rows,
+                     reserved_offset);
         }
 
         // update average row data size
@@ -336,8 +364,38 @@ SegmentGrowingImpl::LoadDeletedRecord(const LoadDeletedRecordInfo& info) {
     ParsePksFromIDs(pks, field_meta.get_data_type(), *info.primary_keys);
     auto timestamps = reinterpret_cast<const Timestamp*>(info.timestamps);
 
-    // step 2: fill pks and timestamps
-    deleted_record_.push(pks, timestamps);
+    std::vector<std::tuple<Timestamp, PkType>> ordering(size);
+    for (int i = 0; i < size; i++) {
+        ordering[i] = std::make_tuple(timestamps[i], pks[i]);
+    }
+
+    if (!insert_record_.empty_pks()) {
+        auto end = std::remove_if(
+            ordering.begin(),
+            ordering.end(),
+            [&](const std::tuple<Timestamp, PkType>& record) {
+                return !insert_record_.contain(std::get<1>(record));
+            });
+        size = end - ordering.begin();
+        ordering.resize(size);
+    }
+
+    // all record filtered
+    if (size == 0) {
+        return;
+    }
+
+    std::sort(ordering.begin(), ordering.end());
+    std::vector<PkType> sort_pks(size);
+    std::vector<Timestamp> sort_timestamps(size);
+
+    for (int i = 0; i < size; i++) {
+        auto [t, pk] = ordering[i];
+        sort_timestamps[i] = t;
+        sort_pks[i] = pk;
+    }
+
+    deleted_record_.push(sort_pks, sort_timestamps.data());
 }
 
 SpanBase
@@ -351,8 +409,17 @@ SegmentGrowingImpl::chunk_view_impl(FieldId field_id, int64_t chunk_id) const {
               "chunk view impl not implement for growing segment");
 }
 
+std::pair<std::vector<std::string_view>, FixedVector<bool>>
+SegmentGrowingImpl::chunk_view_by_offsets(
+    FieldId field_id,
+    int64_t chunk_id,
+    const FixedVector<int32_t>& offsets) const {
+    PanicInfo(ErrorCode::NotImplemented,
+              "chunk view by offsets not implemented for growing segment");
+}
+
 int64_t
-SegmentGrowingImpl::num_chunk() const {
+SegmentGrowingImpl::num_chunk(FieldId field_id) const {
     auto size = get_insert_record().ack_responder_.GetAck();
     return upper_div(size, segcore_config_.get_chunk_rows());
 }
@@ -799,9 +866,51 @@ SegmentGrowingImpl::get_active_count(Timestamp ts) const {
 }
 
 void
-SegmentGrowingImpl::mask_with_timestamps(BitsetType& bitset_chunk,
+SegmentGrowingImpl::mask_with_timestamps(BitsetTypeView& bitset_chunk,
                                          Timestamp timestamp) const {
     // DO NOTHING
+}
+
+void
+SegmentGrowingImpl::CreateTextIndex(FieldId field_id) {
+    std::unique_lock lock(mutex_);
+    const auto& field_meta = schema_->operator[](field_id);
+    AssertInfo(IsStringDataType(field_meta.get_data_type()),
+               "cannot create text index on non-string type");
+    std::string unique_id = GetUniqueFieldId(field_meta.get_id().get());
+    // todo: make this(200) configurable.
+    auto index = std::make_unique<index::TextMatchIndex>(
+        200,
+        unique_id.c_str(),
+        "milvus_tokenizer",
+        field_meta.get_analyzer_params().c_str());
+    index->Commit();
+    index->CreateReader();
+    index->RegisterTokenizer("milvus_tokenizer",
+                             field_meta.get_analyzer_params().c_str());
+    text_indexes_[field_id] = std::move(index);
+}
+
+void
+SegmentGrowingImpl::CreateTextIndexes() {
+    for (auto [field_id, field_meta] : schema_->get_fields()) {
+        if (IsStringDataType(field_meta.get_data_type()) &&
+            field_meta.enable_match()) {
+            CreateTextIndex(FieldId(field_id));
+        }
+    }
+}
+
+void
+SegmentGrowingImpl::AddTexts(milvus::FieldId field_id,
+                             const std::string* texts,
+                             const bool* texts_valid_data,
+                             size_t n,
+                             int64_t offset_begin) {
+    std::unique_lock lock(mutex_);
+    auto iter = text_indexes_.find(field_id);
+    AssertInfo(iter != text_indexes_.end(), "text index not found");
+    iter->second->AddTexts(n, texts, texts_valid_data, offset_begin);
 }
 
 }  // namespace milvus::segcore

@@ -209,20 +209,21 @@ func (s *IndexNodeSuite) SetupTest() {
 	s.NoError(err)
 
 	s.storageConfig = &indexpb.StorageConfig{
-		Address:          Params.MinioCfg.Address.GetValue(),
-		AccessKeyID:      Params.MinioCfg.AccessKeyID.GetValue(),
-		SecretAccessKey:  Params.MinioCfg.SecretAccessKey.GetValue(),
-		UseSSL:           Params.MinioCfg.UseSSL.GetAsBool(),
-		SslCACert:        Params.MinioCfg.SslCACert.GetValue(),
-		BucketName:       Params.MinioCfg.BucketName.GetValue(),
-		RootPath:         Params.MinioCfg.RootPath.GetValue(),
-		UseIAM:           Params.MinioCfg.UseIAM.GetAsBool(),
-		IAMEndpoint:      Params.MinioCfg.IAMEndpoint.GetValue(),
-		StorageType:      Params.CommonCfg.StorageType.GetValue(),
-		Region:           Params.MinioCfg.Region.GetValue(),
-		UseVirtualHost:   Params.MinioCfg.UseVirtualHost.GetAsBool(),
-		CloudProvider:    Params.MinioCfg.CloudProvider.GetValue(),
-		RequestTimeoutMs: Params.MinioCfg.RequestTimeoutMs.GetAsInt64(),
+		Address:           Params.MinioCfg.Address.GetValue(),
+		AccessKeyID:       Params.MinioCfg.AccessKeyID.GetValue(),
+		SecretAccessKey:   Params.MinioCfg.SecretAccessKey.GetValue(),
+		UseSSL:            Params.MinioCfg.UseSSL.GetAsBool(),
+		SslCACert:         Params.MinioCfg.SslCACert.GetValue(),
+		BucketName:        Params.MinioCfg.BucketName.GetValue(),
+		RootPath:          Params.MinioCfg.RootPath.GetValue(),
+		UseIAM:            Params.MinioCfg.UseIAM.GetAsBool(),
+		IAMEndpoint:       Params.MinioCfg.IAMEndpoint.GetValue(),
+		StorageType:       Params.CommonCfg.StorageType.GetValue(),
+		Region:            Params.MinioCfg.Region.GetValue(),
+		UseVirtualHost:    Params.MinioCfg.UseVirtualHost.GetAsBool(),
+		CloudProvider:     Params.MinioCfg.CloudProvider.GetValue(),
+		RequestTimeoutMs:  Params.MinioCfg.RequestTimeoutMs.GetAsInt64(),
+		GcpCredentialJSON: Params.MinioCfg.GcpCredentialJSON.GetValue(),
 	}
 
 	var (
@@ -634,6 +635,7 @@ func (s *IndexNodeSuite) Test_CreateStatsTask() {
 			EndLogID:        s.logID + 200,
 			NumRows:         s.numRows,
 			BinlogMaxSize:   131000,
+			SubJobType:      indexpb.StatsSubJob_Sort,
 		}
 
 		status, err := s.in.CreateJobV2(ctx, &workerpb.CreateJobV2Request{
@@ -661,7 +663,6 @@ func (s *IndexNodeSuite) Test_CreateStatsTask() {
 			if resp.GetStatsJobResults().GetResults()[0].GetState() == indexpb.JobState_JobStateFinished {
 				s.NotZero(len(resp.GetStatsJobResults().GetResults()[0].GetInsertLogs()))
 				s.NotZero(len(resp.GetStatsJobResults().GetResults()[0].GetStatsLogs()))
-				s.Zero(len(resp.GetStatsJobResults().GetResults()[0].GetDeltaLogs()))
 				s.Equal(s.numRows, resp.GetStatsJobResults().GetResults()[0].GetNumRows())
 				break
 			}

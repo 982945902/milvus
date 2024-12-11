@@ -44,12 +44,14 @@ type TxnOption struct {
 
 	// Keepalive is the time to keepalive of the transaction.
 	// If the txn don't append message in the keepalive time, the txn will be expired.
-	// Only make sense when ttl is greater than 1ms.
+	// Only make sense when keepalive is greater than 1ms.
+	// The default value is 0, which means the keepalive is setted by the wal at streaming node.
 	Keepalive time.Duration
 }
 
 type ReadOption struct {
 	// VChannel is the target vchannel to read.
+	// It must be set to read message from a vchannel.
 	VChannel string
 
 	// DeliverPolicy is the deliver policy of the consumer.

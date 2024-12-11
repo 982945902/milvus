@@ -70,11 +70,6 @@ class PhyTermFilterExpr : public SegmentExpr {
     void
     Eval(EvalCtx& context, VectorPtr& result) override;
 
-    void
-    SetUseCacheOffsets() {
-        use_cache_offsets_ = true;
-    }
-
  private:
     void
     InitPkCacheOffset();
@@ -88,47 +83,44 @@ class PhyTermFilterExpr : public SegmentExpr {
 
     template <typename T>
     VectorPtr
-    ExecVisitorImpl();
+    ExecVisitorImpl(OffsetVector* input = nullptr);
 
     template <typename T>
     VectorPtr
-    ExecVisitorImplForIndex();
+    ExecVisitorImplForIndex(OffsetVector* input = nullptr);
 
     template <typename T>
     VectorPtr
-    ExecVisitorImplForData();
+    ExecVisitorImplForData(OffsetVector* input = nullptr);
 
     template <typename ValueType>
     VectorPtr
-    ExecVisitorImplTemplateJson();
+    ExecVisitorImplTemplateJson(OffsetVector* input = nullptr);
 
     template <typename ValueType>
     VectorPtr
-    ExecTermJsonVariableInField();
+    ExecTermJsonVariableInField(OffsetVector* input = nullptr);
 
     template <typename ValueType>
     VectorPtr
-    ExecTermJsonFieldInVariable();
+    ExecTermJsonFieldInVariable(OffsetVector* input = nullptr);
 
     template <typename ValueType>
     VectorPtr
-    ExecVisitorImplTemplateArray();
+    ExecVisitorImplTemplateArray(OffsetVector* input = nullptr);
 
     template <typename ValueType>
     VectorPtr
-    ExecTermArrayVariableInField();
+    ExecTermArrayVariableInField(OffsetVector* input = nullptr);
 
     template <typename ValueType>
     VectorPtr
-    ExecTermArrayFieldInVariable();
+    ExecTermArrayFieldInVariable(OffsetVector* input = nullptr);
 
  private:
     std::shared_ptr<const milvus::expr::TermFilterExpr> expr_;
     milvus::Timestamp query_timestamp_;
-    // If expr is like "pk in (..)", can use pk index to optimize
-    bool use_cache_offsets_{false};
-    bool cached_offsets_inited_{false};
-    ColumnVectorPtr cached_offsets_;
+    bool cached_bits_inited_{false};
     TargetBitmap cached_bits_;
 };
 }  //namespace exec

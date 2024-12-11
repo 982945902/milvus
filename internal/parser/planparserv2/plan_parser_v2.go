@@ -2,59 +2,97 @@ package planparserv2
 
 import (
 	"fmt"
+	"strings"
+	"time"
+	"unicode"
 
-	"github.com/antlr/antlr4/runtime/Go/antlr"
+	"github.com/antlr4-go/antlr/v4"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	planparserv2 "github.com/milvus-io/milvus/internal/parser/planparserv2/generated"
 	"github.com/milvus-io/milvus/internal/proto/planpb"
 	"github.com/milvus-io/milvus/pkg/log"
+	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
-func handleExpr(schema *typeutil.SchemaHelper, exprStr string) interface{} {
-	return handleExprWithErrorListener(schema, exprStr, &errorListenerImpl{})
-}
+var (
+	exprCache   = expirable.NewLRU[string, any](1024, nil, time.Minute*10)
+	trueLiteral = &ExprWithType{
+		dataType: schemapb.DataType_Bool,
+		expr:     alwaysTrueExpr(),
+	}
+)
 
-func handleExprWithErrorListener(schema *typeutil.SchemaHelper, exprStr string, errorListener errorListener) interface{} {
-	if isEmptyExpression(exprStr) {
-		return &ExprWithType{
-			dataType: schemapb.DataType_Bool,
-			expr:     alwaysTrueExpr(),
+func handleInternal(exprStr string) (ast planparserv2.IExprContext, err error) {
+	val, ok := exprCache.Get(exprStr)
+	if ok {
+		switch v := val.(type) {
+		case planparserv2.IExprContext:
+			return v, nil
+		case error:
+			return nil, v
+		default:
+			return nil, fmt.Errorf("unknown cache error: %v", v)
 		}
 	}
 
-	inputStream := antlr.NewInputStream(exprStr)
-	lexer := getLexer(inputStream, errorListener)
-	if errorListener.Error() != nil {
-		return errorListener.Error()
+	// Note that the errors will be cached, too.
+	defer func() {
+		if err != nil {
+			exprCache.Add(exprStr, err)
+		}
+	}()
+	exprNormal := convertHanToASCII(exprStr)
+	listener := &errorListenerImpl{}
+
+	inputStream := antlr.NewInputStream(exprNormal)
+	lexer := getLexer(inputStream, listener)
+	if err = listener.Error(); err != nil {
+		return
 	}
 
-	parser := getParser(lexer, errorListener)
-	if errorListener.Error() != nil {
-		return errorListener.Error()
+	parser := getParser(lexer, listener)
+	if err = listener.Error(); err != nil {
+		return
 	}
 
-	ast := parser.Expr()
-	if errorListener.Error() != nil {
-		return errorListener.Error()
+	ast = parser.Expr()
+	if err = listener.Error(); err != nil {
+		return
 	}
 
 	if parser.GetCurrentToken().GetTokenType() != antlr.TokenEOF {
 		log.Info("invalid expression", zap.String("expr", exprStr))
-		return fmt.Errorf("invalid expression: %s", exprStr)
+		err = fmt.Errorf("invalid expression: %s", exprStr)
+		return
 	}
 
 	// lexer & parser won't be used by this thread, can be put into pool.
 	putLexer(lexer)
 	putParser(parser)
 
+	exprCache.Add(exprStr, ast)
+	return
+}
+
+func handleExpr(schema *typeutil.SchemaHelper, exprStr string) interface{} {
+	if isEmptyExpression(exprStr) {
+		return trueLiteral
+	}
+	ast, err := handleInternal(exprStr)
+	if err != nil {
+		return err
+	}
+
 	visitor := NewParserVisitor(schema)
 	return ast.Accept(visitor)
 }
 
-func ParseExpr(schema *typeutil.SchemaHelper, exprStr string) (*planpb.Expr, error) {
+func ParseExpr(schema *typeutil.SchemaHelper, exprStr string, exprTemplateValues map[string]*schemapb.TemplateValue) (*planpb.Expr, error) {
 	ret := handleExpr(schema, exprStr)
 
 	if err := getError(ret); err != nil {
@@ -67,6 +105,15 @@ func ParseExpr(schema *typeutil.SchemaHelper, exprStr string) (*planpb.Expr, err
 	}
 	if !canBeExecuted(predicate) {
 		return nil, fmt.Errorf("predicate is not a boolean expression: %s, data type: %s", exprStr, predicate.dataType)
+	}
+
+	valueMap, err := UnmarshalExpressionValues(exprTemplateValues)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := FillExpressionValue(predicate.expr, valueMap); err != nil {
+		return nil, err
 	}
 
 	return predicate.expr, nil
@@ -90,8 +137,8 @@ func ParseIdentifier(schema *typeutil.SchemaHelper, identifier string, checkFunc
 	return checkFunc(predicate.expr)
 }
 
-func CreateRetrievePlan(schema *typeutil.SchemaHelper, exprStr string) (*planpb.PlanNode, error) {
-	expr, err := ParseExpr(schema, exprStr)
+func CreateRetrievePlan(schema *typeutil.SchemaHelper, exprStr string, exprTemplateValues map[string]*schemapb.TemplateValue) (*planpb.PlanNode, error) {
+	expr, err := ParseExpr(schema, exprStr, exprTemplateValues)
 	if err != nil {
 		return nil, err
 	}
@@ -106,12 +153,42 @@ func CreateRetrievePlan(schema *typeutil.SchemaHelper, exprStr string) (*planpb.
 	return planNode, nil
 }
 
-func CreateSearchPlan(schema *typeutil.SchemaHelper, exprStr string, vectorFieldName string, queryInfo *planpb.QueryInfo) (*planpb.PlanNode, error) {
+func convertHanToASCII(s string) string {
+	var builder strings.Builder
+	builder.Grow(len(s) * 6)
+	skipCur := false
+	n := len(s)
+	for i, r := range s {
+		if skipCur {
+			builder.WriteRune(r)
+			skipCur = false
+			continue
+		}
+		if r == '\\' {
+			if i+1 < n && !isEscapeCh(s[i+1]) {
+				return s
+			}
+			skipCur = true
+			builder.WriteRune(r)
+			continue
+		}
+
+		if unicode.Is(unicode.Han, r) {
+			builder.WriteString(formatUnicode(uint32(r)))
+		} else {
+			builder.WriteRune(r)
+		}
+	}
+
+	return builder.String()
+}
+
+func CreateSearchPlan(schema *typeutil.SchemaHelper, exprStr string, vectorFieldName string, queryInfo *planpb.QueryInfo, exprTemplateValues map[string]*schemapb.TemplateValue) (*planpb.PlanNode, error) {
 	parse := func() (*planpb.Expr, error) {
 		if len(exprStr) <= 0 {
 			return nil, nil
 		}
-		return ParseExpr(schema, exprStr)
+		return ParseExpr(schema, exprStr, exprTemplateValues)
 	}
 
 	expr, err := parse()
@@ -123,6 +200,10 @@ func CreateSearchPlan(schema *typeutil.SchemaHelper, exprStr string, vectorField
 	if err != nil {
 		log.Info("CreateSearchPlan failed", zap.Error(err))
 		return nil, err
+	}
+	// plan ok with schema, check ann field
+	if !schema.IsFieldLoaded(vectorField.GetFieldID()) {
+		return nil, merr.WrapErrParameterInvalidMsg("ann field \"%s\" not loaded", vectorFieldName)
 	}
 	fieldID := vectorField.FieldID
 	dataType := vectorField.DataType

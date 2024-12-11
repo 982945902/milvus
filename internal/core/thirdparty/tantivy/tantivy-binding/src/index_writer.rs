@@ -10,6 +10,7 @@ use tantivy::{doc, tokenizer, Document, Index, IndexWriter};
 
 use crate::data_type::TantivyDataType;
 
+use crate::index_reader::IndexReaderWrapper;
 use crate::log::init_log;
 
 pub(crate) struct IndexWriterWrapper {
@@ -31,7 +32,6 @@ impl IndexWriterWrapper {
 
         let field: Field;
         let mut schema_builder = Schema::builder();
-        let mut use_raw_tokenizer = false;
         match data_type {
             TantivyDataType::I64 => {
                 field = schema_builder.add_i64_field(&field_name, INDEXED);
@@ -44,21 +44,18 @@ impl IndexWriterWrapper {
             }
             TantivyDataType::Keyword => {
                 let text_field_indexing = TextFieldIndexing::default()
-                    .set_tokenizer("raw_tokenizer")
+                    .set_tokenizer("raw")
                     .set_index_option(IndexRecordOption::Basic);
                 let text_options = TextOptions::default().set_indexing_options(text_field_indexing);
                 field = schema_builder.add_text_field(&field_name, text_options);
-                use_raw_tokenizer = true;
+            }
+            TantivyDataType::Text => {
+                panic!("text should be indexed with analyzer");
             }
         }
         let id_field = schema_builder.add_i64_field("doc_id", FAST);
         let schema = schema_builder.build();
         let index = Index::create_in_dir(path.clone(), schema).unwrap();
-        if use_raw_tokenizer {
-            index
-                .tokenizers()
-                .register("raw_tokenizer", tokenizer::RawTokenizer::default());
-        }
         let index_writer = index
             .writer_with_num_threads(num_threads, overall_memory_budget_in_bytes)
             .unwrap();
@@ -68,6 +65,10 @@ impl IndexWriterWrapper {
             id_field,
             index: Arc::new(index),
         }
+    }
+
+    pub fn create_reader(&self) -> IndexReaderWrapper {
+        IndexReaderWrapper::from_index(self.index.clone())
     }
 
     pub fn add_i8(&mut self, data: i8, offset: i64) {

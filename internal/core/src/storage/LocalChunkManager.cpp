@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include "LocalChunkManager.h"
+#include "log/Log.h"
 
 #include <boost/filesystem.hpp>
 #include <boost/system/error_code.hpp>
@@ -24,13 +25,6 @@
 #include "common/EasyAssert.h"
 #include "common/Exception.h"
 
-#define THROWLOCALERROR(code, FUNCTION)                           \
-    do {                                                          \
-        std::stringstream err_msg;                                \
-        err_msg << "Error:" << #FUNCTION << ":" << err.message(); \
-        throw SegcoreError(code, err_msg.str());                  \
-    } while (0)
-
 namespace milvus::storage {
 
 bool
@@ -39,7 +33,10 @@ LocalChunkManager::Exist(const std::string& filepath) {
     boost::system::error_code err;
     bool isExist = boost::filesystem::exists(absPath, err);
     if (err && err.value() != boost::system::errc::no_such_file_or_directory) {
-        THROWLOCALERROR(FileReadFailed, Exist);
+        PanicInfo(FileReadFailed,
+                  fmt::format("local file {} exist interface failed, error: {}",
+                              filepath,
+                              err.message()));
     }
     return isExist;
 }
@@ -54,7 +51,10 @@ LocalChunkManager::Size(const std::string& filepath) {
     boost::system::error_code err;
     int64_t size = boost::filesystem::file_size(absPath, err);
     if (err) {
-        THROWLOCALERROR(FileReadFailed, FileSize);
+        PanicInfo(FileReadFailed,
+                  fmt::format("get local file {} size failed, error: {}",
+                              filepath,
+                              err.message()));
     }
     return size;
 }
@@ -65,7 +65,10 @@ LocalChunkManager::Remove(const std::string& filepath) {
     boost::system::error_code err;
     boost::filesystem::remove(absPath, err);
     if (err) {
-        THROWLOCALERROR(FileWriteFailed, Remove);
+        PanicInfo(FileWriteFailed,
+                  fmt::format("remove local file {} failed, error: {}",
+                              filepath,
+                              err.message()));
     }
 }
 
@@ -186,7 +189,11 @@ LocalChunkManager::DirExist(const std::string& dir) {
     boost::system::error_code err;
     bool isExist = boost::filesystem::exists(dirPath, err);
     if (err && err.value() != boost::system::errc::no_such_file_or_directory) {
-        THROWLOCALERROR(FileReadFailed, DirExist);
+        PanicInfo(
+            FileWriteFailed,
+            fmt::format("local directory {} exist interface failed, error: {}",
+                        dir,
+                        err.message()));
     }
     return isExist;
 }
@@ -200,7 +207,7 @@ LocalChunkManager::CreateDir(const std::string& dir) {
     boost::filesystem::path dirPath(dir);
     auto create_success = boost::filesystem::create_directories(dirPath);
     if (!create_success) {
-        PanicInfo(FileCreateFailed, "create dir failed" + dir);
+        PanicInfo(FileCreateFailed, "create dir:" + dir + " failed");
     }
 }
 
@@ -210,7 +217,10 @@ LocalChunkManager::RemoveDir(const std::string& dir) {
     boost::system::error_code err;
     boost::filesystem::remove_all(dirPath, err);
     if (err) {
-        THROWLOCALERROR(FileCreateFailed, RemoveDir);
+        PanicInfo(FileWriteFailed,
+                  fmt::format("remove local directory:{} failed, error: {}",
+                              dir,
+                              err.message()));
     }
 }
 
@@ -232,7 +242,17 @@ LocalChunkManager::GetSizeOfDir(const std::string& dir) {
          it != v.end();
          ++it) {
         if (boost::filesystem::is_regular_file(it->path())) {
-            total_file_size += boost::filesystem::file_size(it->path());
+            boost::system::error_code ec;
+            auto file_size = boost::filesystem::file_size(it->path(), ec);
+            if (ec) {
+                // The file may be removed concurrently by other threads.
+                // So the file size cannot be obtained, just ignore it.
+                LOG_INFO("size of file {} cannot be obtained with error: {}",
+                         it->path().string(),
+                         ec.message());
+                continue;
+            }
+            total_file_size += file_size;
         }
         if (boost::filesystem::is_directory(it->path())) {
             total_file_size += GetSizeOfDir(it->path().string());

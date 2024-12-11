@@ -18,6 +18,7 @@ import (
 	"github.com/milvus-io/milvus/internal/flushcommon/syncmgr"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/streamingutil"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
@@ -36,8 +37,10 @@ const (
 type WriteBuffer interface {
 	// HasSegment checks whether certain segment exists in this buffer.
 	HasSegment(segmentID int64) bool
+	// CreateNewGrowingSegment creates a new growing segment in the buffer.
+	CreateNewGrowingSegment(partitionID int64, segmentID int64, startPos *msgpb.MsgPosition)
 	// BufferData is the method to buffer dml data msgs.
-	BufferData(insertMsgs []*msgstream.InsertMsg, deleteMsgs []*msgstream.DeleteMsg, startPos, endPos *msgpb.MsgPosition) error
+	BufferData(insertMsgs []*InsertData, deleteMsgs []*msgstream.DeleteMsg, startPos, endPos *msgpb.MsgPosition) error
 	// FlushTimestamp set flush timestamp for write buffer
 	SetFlushTimestamp(flushTs uint64)
 	// GetFlushTimestamp get current flush timestamp
@@ -65,38 +68,35 @@ type checkpointCandidate struct {
 }
 
 type checkpointCandidates struct {
-	candidates map[string]*checkpointCandidate
-	mu         sync.RWMutex
+	candidates *typeutil.ConcurrentMap[string, *checkpointCandidate]
+}
+
+func getCandidatesKey(segmentID int64, timestamp uint64) string {
+	return fmt.Sprintf("%d-%d", segmentID, timestamp)
 }
 
 func newCheckpointCandiates() *checkpointCandidates {
 	return &checkpointCandidates{
-		candidates: make(map[string]*checkpointCandidate),
+		candidates: typeutil.NewConcurrentMap[string, *checkpointCandidate](), // segmentID-ts
 	}
 }
 
 func (c *checkpointCandidates) Remove(segmentID int64, timestamp uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.candidates, fmt.Sprintf("%d-%d", segmentID, timestamp))
+	c.candidates.Remove(getCandidatesKey(segmentID, timestamp))
 }
 
 func (c *checkpointCandidates) Add(segmentID int64, position *msgpb.MsgPosition, source string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.candidates[fmt.Sprintf("%d-%d", segmentID, position.GetTimestamp())] = &checkpointCandidate{segmentID, position, source}
+	c.candidates.Insert(getCandidatesKey(segmentID, position.GetTimestamp()), &checkpointCandidate{segmentID, position, source})
 }
 
 func (c *checkpointCandidates) GetEarliestWithDefault(def *checkpointCandidate) *checkpointCandidate {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	var result *checkpointCandidate = def
-	for _, candidate := range c.candidates {
+	c.candidates.Range(func(_ string, candidate *checkpointCandidate) bool {
 		if result == nil || candidate.position.GetTimestamp() < result.position.GetTimestamp() {
 			result = candidate
 		}
-	}
+		return true
+	})
 	return result
 }
 
@@ -106,30 +106,20 @@ func NewWriteBuffer(channel string, metacache metacache.MetaCache, syncMgr syncm
 		opt(option)
 	}
 
-	switch option.deletePolicy {
-	case DeletePolicyBFPkOracle:
-		return NewBFWriteBuffer(channel, metacache, syncMgr, option)
-	case DeletePolicyL0Delta:
-		return NewL0WriteBuffer(channel, metacache, syncMgr, option)
-	default:
-		return nil, merr.WrapErrParameterInvalid("valid delete policy config", option.deletePolicy)
-	}
+	return NewL0WriteBuffer(channel, metacache, syncMgr, option)
 }
 
 // writeBufferBase is the common component for buffering data
 type writeBufferBase struct {
-	mut sync.RWMutex
-
 	collectionID int64
 	channelName  string
 
 	metaWriter       syncmgr.MetaWriter
 	collSchema       *schemapb.CollectionSchema
-	helper           *typeutil.SchemaHelper
-	pkField          *schemapb.FieldSchema
 	estSizePerRecord int
 	metaCache        metacache.MetaCache
 
+	mut     sync.RWMutex
 	buffers map[int64]*segmentBuffer // segmentID => segmentBuffer
 
 	syncPolicies   []SyncPolicy
@@ -139,6 +129,9 @@ type writeBufferBase struct {
 
 	checkpoint     *msgpb.MsgPosition
 	flushTimestamp *atomic.Uint64
+
+	errHandler           func(err error)
+	taskObserverCallback func(t syncmgr.Task, err error) // execute when a sync task finished, should be concurrent safe.
 
 	// pre build logger
 	logger        *log.MLogger
@@ -166,30 +159,22 @@ func newWriteBufferBase(channel string, metacache metacache.MetaCache, syncMgr s
 	if err != nil {
 		return nil, err
 	}
-	helper, err := typeutil.CreateSchemaHelper(schema)
-	if err != nil {
-		return nil, err
-	}
-	pkField, err := helper.GetPrimaryKeyField()
-	if err != nil {
-		return nil, err
-	}
 
 	wb := &writeBufferBase{
-		channelName:      channel,
-		collectionID:     metacache.Collection(),
-		collSchema:       schema,
-		helper:           helper,
-		pkField:          pkField,
-		estSizePerRecord: estSize,
-		syncMgr:          syncMgr,
-		metaWriter:       option.metaWriter,
-		buffers:          make(map[int64]*segmentBuffer),
-		metaCache:        metacache,
-		serializer:       serializer,
-		syncCheckpoint:   newCheckpointCandiates(),
-		syncPolicies:     option.syncPolicies,
-		flushTimestamp:   flushTs,
+		channelName:          channel,
+		collectionID:         metacache.Collection(),
+		collSchema:           schema,
+		estSizePerRecord:     estSize,
+		syncMgr:              syncMgr,
+		metaWriter:           option.metaWriter,
+		buffers:              make(map[int64]*segmentBuffer),
+		metaCache:            metacache,
+		serializer:           serializer,
+		syncCheckpoint:       newCheckpointCandiates(),
+		syncPolicies:         option.syncPolicies,
+		flushTimestamp:       flushTs,
+		errHandler:           option.errorHandler,
+		taskObserverCallback: option.taskObserverCallback,
 	}
 
 	wb.logger = log.With(zap.Int64("collectionID", wb.collectionID),
@@ -338,12 +323,23 @@ func (wb *writeBufferBase) syncSegments(ctx context.Context, segmentIDs []int64)
 		}
 
 		result = append(result, wb.syncMgr.SyncData(ctx, syncTask, func(err error) error {
+			if wb.taskObserverCallback != nil {
+				wb.taskObserverCallback(syncTask, err)
+			}
+
 			if err != nil {
 				return err
 			}
 
 			if syncTask.StartPosition() != nil {
 				wb.syncCheckpoint.Remove(syncTask.SegmentID(), syncTask.StartPosition().GetTimestamp())
+			}
+
+			if syncTask.IsFlush() {
+				if paramtable.Get().DataNodeCfg.SkipBFStatsLoad.GetAsBool() || streamingutil.IsStreamingServiceEnabled() {
+					wb.metaCache.RemoveSegments(metacache.WithSegmentIDs(syncTask.SegmentID()))
+					log.Info("flushed segment removed", zap.Int64("segmentID", syncTask.SegmentID()), zap.String("channel", syncTask.ChannelName()))
+				}
 			}
 			return nil
 		}))
@@ -382,34 +378,96 @@ func (wb *writeBufferBase) getOrCreateBuffer(segmentID int64) *segmentBuffer {
 	return buffer
 }
 
-func (wb *writeBufferBase) yieldBuffer(segmentID int64) ([]*storage.InsertData, *storage.DeleteData, *TimeRange, *msgpb.MsgPosition) {
+func (wb *writeBufferBase) yieldBuffer(segmentID int64) ([]*storage.InsertData, map[int64]*storage.BM25Stats, *storage.DeleteData, *TimeRange, *msgpb.MsgPosition) {
 	buffer, ok := wb.buffers[segmentID]
 	if !ok {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 
 	// remove buffer and move it to sync manager
 	delete(wb.buffers, segmentID)
 	start := buffer.EarliestPosition()
 	timeRange := buffer.GetTimeRange()
-	insert, delta := buffer.Yield()
+	insert, bm25, delta := buffer.Yield()
 
-	return insert, delta, timeRange, start
+	return insert, bm25, delta, timeRange, start
 }
 
-type inData struct {
+type InsertData struct {
 	segmentID   int64
 	partitionID int64
 	data        []*storage.InsertData
-	pkField     []storage.FieldData
-	tsField     []*storage.Int64FieldData
-	rowNum      int64
+	bm25Stats   map[int64]*storage.BM25Stats
+
+	pkField []storage.FieldData
+	pkType  schemapb.DataType
+
+	tsField []*storage.Int64FieldData
+	rowNum  int64
 
 	intPKTs map[int64]int64
 	strPKTs map[string]int64
 }
 
-func (id *inData) pkExists(pk storage.PrimaryKey, ts uint64) bool {
+func NewInsertData(segmentID, partitionID int64, cap int, pkType schemapb.DataType) *InsertData {
+	data := &InsertData{
+		segmentID:   segmentID,
+		partitionID: partitionID,
+		data:        make([]*storage.InsertData, 0, cap),
+		pkField:     make([]storage.FieldData, 0, cap),
+		pkType:      pkType,
+	}
+
+	switch pkType {
+	case schemapb.DataType_Int64:
+		data.intPKTs = make(map[int64]int64)
+	case schemapb.DataType_VarChar:
+		data.strPKTs = make(map[string]int64)
+	}
+
+	return data
+}
+
+func (id *InsertData) Append(data *storage.InsertData, pkFieldData storage.FieldData, tsFieldData *storage.Int64FieldData) {
+	id.data = append(id.data, data)
+	id.pkField = append(id.pkField, pkFieldData)
+	id.tsField = append(id.tsField, tsFieldData)
+	id.rowNum += int64(data.GetRowNum())
+
+	timestamps := tsFieldData.GetDataRows().([]int64)
+	switch id.pkType {
+	case schemapb.DataType_Int64:
+		pks := pkFieldData.GetDataRows().([]int64)
+		for idx, pk := range pks {
+			ts, ok := id.intPKTs[pk]
+			if !ok || timestamps[idx] < ts {
+				id.intPKTs[pk] = timestamps[idx]
+			}
+		}
+	case schemapb.DataType_VarChar:
+		pks := pkFieldData.GetDataRows().([]string)
+		for idx, pk := range pks {
+			ts, ok := id.strPKTs[pk]
+			if !ok || timestamps[idx] < ts {
+				id.strPKTs[pk] = timestamps[idx]
+			}
+		}
+	}
+}
+
+func (id *InsertData) GetSegmentID() int64 {
+	return id.segmentID
+}
+
+func (id *InsertData) SetBM25Stats(bm25Stats map[int64]*storage.BM25Stats) {
+	id.bm25Stats = bm25Stats
+}
+
+func (id *InsertData) GetDatas() []*storage.InsertData {
+	return id.data
+}
+
+func (id *InsertData) pkExists(pk storage.PrimaryKey, ts uint64) bool {
 	var ok bool
 	var minTs int64
 	switch pk.Type() {
@@ -422,7 +480,7 @@ func (id *inData) pkExists(pk storage.PrimaryKey, ts uint64) bool {
 	return ok && ts > uint64(minTs)
 }
 
-func (id *inData) batchPkExists(pks []storage.PrimaryKey, tss []uint64, hits []bool) []bool {
+func (id *InsertData) batchPkExists(pks []storage.PrimaryKey, tss []uint64, hits []bool) []bool {
 	if len(pks) == 0 {
 		return nil
 	}
@@ -448,105 +506,34 @@ func (id *inData) batchPkExists(pks []storage.PrimaryKey, tss []uint64, hits []b
 	return hits
 }
 
-// prepareInsert transfers InsertMsg into organized InsertData grouped by segmentID
-// also returns primary key field data
-func (wb *writeBufferBase) prepareInsert(insertMsgs []*msgstream.InsertMsg) ([]*inData, error) {
-	groups := lo.GroupBy(insertMsgs, func(msg *msgstream.InsertMsg) int64 { return msg.SegmentID })
-	segmentPartition := lo.SliceToMap(insertMsgs, func(msg *msgstream.InsertMsg) (int64, int64) { return msg.GetSegmentID(), msg.GetPartitionID() })
-
-	result := make([]*inData, 0, len(groups))
-	for segment, msgs := range groups {
-		inData := &inData{
-			segmentID:   segment,
-			partitionID: segmentPartition[segment],
-			data:        make([]*storage.InsertData, 0, len(msgs)),
-			pkField:     make([]storage.FieldData, 0, len(msgs)),
-		}
-		switch wb.pkField.GetDataType() {
-		case schemapb.DataType_Int64:
-			inData.intPKTs = make(map[int64]int64)
-		case schemapb.DataType_VarChar:
-			inData.strPKTs = make(map[string]int64)
-		}
-
-		for _, msg := range msgs {
-			data, err := storage.InsertMsgToInsertData(msg, wb.collSchema)
-			if err != nil {
-				log.Warn("failed to transfer insert msg to insert data", zap.Error(err))
-				return nil, err
-			}
-
-			pkFieldData, err := storage.GetPkFromInsertData(wb.collSchema, data)
-			if err != nil {
-				return nil, err
-			}
-			if pkFieldData.RowNum() != data.GetRowNum() {
-				return nil, merr.WrapErrServiceInternal("pk column row num not match")
-			}
-
-			tsFieldData, err := storage.GetTimestampFromInsertData(data)
-			if err != nil {
-				return nil, err
-			}
-			if tsFieldData.RowNum() != data.GetRowNum() {
-				return nil, merr.WrapErrServiceInternal("timestamp column row num not match")
-			}
-
-			timestamps := tsFieldData.GetDataRows().([]int64)
-
-			switch wb.pkField.GetDataType() {
-			case schemapb.DataType_Int64:
-				pks := pkFieldData.GetDataRows().([]int64)
-				for idx, pk := range pks {
-					ts, ok := inData.intPKTs[pk]
-					if !ok || timestamps[idx] < ts {
-						inData.intPKTs[pk] = timestamps[idx]
-					}
-				}
-			case schemapb.DataType_VarChar:
-				pks := pkFieldData.GetDataRows().([]string)
-				for idx, pk := range pks {
-					ts, ok := inData.strPKTs[pk]
-					if !ok || timestamps[idx] < ts {
-						inData.strPKTs[pk] = timestamps[idx]
-					}
-				}
-			}
-
-			inData.data = append(inData.data, data)
-			inData.pkField = append(inData.pkField, pkFieldData)
-			inData.tsField = append(inData.tsField, tsFieldData)
-			inData.rowNum += int64(data.GetRowNum())
-		}
-		result = append(result, inData)
-	}
-
-	return result, nil
-}
-
-// bufferInsert transform InsertMsg into bufferred InsertData and returns primary key field data for future usage.
-func (wb *writeBufferBase) bufferInsert(inData *inData, startPos, endPos *msgpb.MsgPosition) error {
-	_, ok := wb.metaCache.GetSegmentByID(inData.segmentID)
+func (wb *writeBufferBase) CreateNewGrowingSegment(partitionID int64, segmentID int64, startPos *msgpb.MsgPosition) {
+	_, ok := wb.metaCache.GetSegmentByID(segmentID)
 	// new segment
 	if !ok {
 		wb.metaCache.AddSegment(&datapb.SegmentInfo{
-			ID:            inData.segmentID,
-			PartitionID:   inData.partitionID,
+			ID:            segmentID,
+			PartitionID:   partitionID,
 			CollectionID:  wb.collectionID,
 			InsertChannel: wb.channelName,
 			StartPosition: startPos,
 			State:         commonpb.SegmentState_Growing,
 		}, func(_ *datapb.SegmentInfo) pkoracle.PkStat {
 			return pkoracle.NewBloomFilterSetWithBatchSize(wb.getEstBatchSize())
-		}, metacache.SetStartPosRecorded(false))
-		log.Info("add growing segment", zap.Int64("segmentID", inData.segmentID), zap.String("channel", wb.channelName))
+		}, metacache.NewBM25StatsFactory, metacache.SetStartPosRecorded(false))
+		log.Info("add growing segment", zap.Int64("segmentID", segmentID), zap.String("channel", wb.channelName))
 	}
+}
 
+// bufferInsert function InsertMsg into bufferred InsertData and returns primary key field data for future usage.
+func (wb *writeBufferBase) bufferInsert(inData *InsertData, startPos, endPos *msgpb.MsgPosition) error {
+	wb.CreateNewGrowingSegment(inData.partitionID, inData.segmentID, startPos)
 	segBuf := wb.getOrCreateBuffer(inData.segmentID)
 
 	totalMemSize := segBuf.insertBuffer.Buffer(inData, startPos, endPos)
-	wb.metaCache.UpdateSegments(metacache.UpdateBufferedRows(segBuf.insertBuffer.rows),
-		metacache.WithSegmentIDs(inData.segmentID))
+	wb.metaCache.UpdateSegments(metacache.SegmentActions(
+		metacache.UpdateBufferedRows(segBuf.insertBuffer.rows),
+		metacache.SetStartPositionIfNil(startPos),
+	), metacache.WithSegmentIDs(inData.segmentID))
 
 	metrics.DataNodeFlowGraphBufferDataSize.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), fmt.Sprint(wb.collectionID)).Add(float64(totalMemSize))
 
@@ -573,7 +560,7 @@ func (wb *writeBufferBase) getSyncTask(ctx context.Context, segmentID int64) (sy
 	var totalMemSize float64 = 0
 	var tsFrom, tsTo uint64
 
-	insert, delta, timeRange, startPos := wb.yieldBuffer(segmentID)
+	insert, bm25, delta, timeRange, startPos := wb.yieldBuffer(segmentID)
 	if timeRange != nil {
 		tsFrom, tsTo = timeRange.timestampMin, timeRange.timestampMax
 	}
@@ -606,8 +593,14 @@ func (wb *writeBufferBase) getSyncTask(ctx context.Context, segmentID int64) (sy
 		WithStartPosition(startPos).
 		WithTimeRange(tsFrom, tsTo).
 		WithLevel(segmentInfo.Level()).
+		WithDataSource(metrics.StreamingDataSourceLabel).
 		WithCheckpoint(wb.checkpoint).
-		WithBatchSize(batchSize)
+		WithBatchRows(batchSize).
+		WithErrorHandler(wb.errHandler)
+
+	if len(bm25) != 0 {
+		pack.WithBM25Stats(bm25)
+	}
 
 	if segmentInfo.State() == commonpb.SegmentState_Flushing ||
 		segmentInfo.Level() == datapb.SegmentLevel_L0 { // Level zero segment will always be sync as flushed
@@ -651,6 +644,10 @@ func (wb *writeBufferBase) Close(ctx context.Context, drop bool) {
 		}
 
 		f := wb.syncMgr.SyncData(ctx, syncTask, func(err error) error {
+			if wb.taskObserverCallback != nil {
+				wb.taskObserverCallback(syncTask, err)
+			}
+
 			if err != nil {
 				return err
 			}
@@ -674,4 +671,80 @@ func (wb *writeBufferBase) Close(ctx context.Context, drop bool) {
 		// TODO change to remove channel in the future
 		panic(err)
 	}
+}
+
+// prepareInsert transfers InsertMsg into organized InsertData grouped by segmentID
+// also returns primary key field data
+func PrepareInsert(collSchema *schemapb.CollectionSchema, pkField *schemapb.FieldSchema, insertMsgs []*msgstream.InsertMsg) ([]*InsertData, error) {
+	groups := lo.GroupBy(insertMsgs, func(msg *msgstream.InsertMsg) int64 { return msg.SegmentID })
+	segmentPartition := lo.SliceToMap(insertMsgs, func(msg *msgstream.InsertMsg) (int64, int64) { return msg.GetSegmentID(), msg.GetPartitionID() })
+
+	result := make([]*InsertData, 0, len(groups))
+	for segment, msgs := range groups {
+		inData := &InsertData{
+			segmentID:   segment,
+			partitionID: segmentPartition[segment],
+			data:        make([]*storage.InsertData, 0, len(msgs)),
+			pkField:     make([]storage.FieldData, 0, len(msgs)),
+		}
+		switch pkField.GetDataType() {
+		case schemapb.DataType_Int64:
+			inData.intPKTs = make(map[int64]int64)
+		case schemapb.DataType_VarChar:
+			inData.strPKTs = make(map[string]int64)
+		}
+
+		for _, msg := range msgs {
+			data, err := storage.InsertMsgToInsertData(msg, collSchema)
+			if err != nil {
+				log.Warn("failed to transfer insert msg to insert data", zap.Error(err))
+				return nil, err
+			}
+
+			pkFieldData, err := storage.GetPkFromInsertData(collSchema, data)
+			if err != nil {
+				return nil, err
+			}
+			if pkFieldData.RowNum() != data.GetRowNum() {
+				return nil, merr.WrapErrServiceInternal("pk column row num not match")
+			}
+
+			tsFieldData, err := storage.GetTimestampFromInsertData(data)
+			if err != nil {
+				return nil, err
+			}
+			if tsFieldData.RowNum() != data.GetRowNum() {
+				return nil, merr.WrapErrServiceInternal("timestamp column row num not match")
+			}
+
+			timestamps := tsFieldData.GetDataRows().([]int64)
+
+			switch pkField.GetDataType() {
+			case schemapb.DataType_Int64:
+				pks := pkFieldData.GetDataRows().([]int64)
+				for idx, pk := range pks {
+					ts, ok := inData.intPKTs[pk]
+					if !ok || timestamps[idx] < ts {
+						inData.intPKTs[pk] = timestamps[idx]
+					}
+				}
+			case schemapb.DataType_VarChar:
+				pks := pkFieldData.GetDataRows().([]string)
+				for idx, pk := range pks {
+					ts, ok := inData.strPKTs[pk]
+					if !ok || timestamps[idx] < ts {
+						inData.strPKTs[pk] = timestamps[idx]
+					}
+				}
+			}
+
+			inData.data = append(inData.data, data)
+			inData.pkField = append(inData.pkField, pkFieldData)
+			inData.tsField = append(inData.tsField, tsFieldData)
+			inData.rowNum += int64(data.GetRowNum())
+		}
+		result = append(result, inData)
+	}
+
+	return result, nil
 }

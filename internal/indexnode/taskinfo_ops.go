@@ -323,6 +323,7 @@ type statsTaskInfo struct {
 	insertLogs    []*datapb.FieldBinlog
 	statsLogs     []*datapb.FieldBinlog
 	textStatsLogs map[int64]*datapb.TextIndexStats
+	bm25Logs      []*datapb.FieldBinlog
 }
 
 func (i *IndexNode) loadOrStoreStatsTask(clusterID string, taskID UniqueID, info *statsTaskInfo) *statsTaskInfo {
@@ -360,7 +361,7 @@ func (i *IndexNode) storeStatsTaskState(clusterID string, taskID UniqueID, state
 	}
 }
 
-func (i *IndexNode) storeStatsResult(
+func (i *IndexNode) storePKSortStatsResult(
 	ClusterID string,
 	taskID UniqueID,
 	collID UniqueID,
@@ -370,7 +371,7 @@ func (i *IndexNode) storeStatsResult(
 	numRows int64,
 	insertLogs []*datapb.FieldBinlog,
 	statsLogs []*datapb.FieldBinlog,
-	fieldStatsLogs map[int64]*datapb.TextIndexStats,
+	bm25Logs []*datapb.FieldBinlog,
 ) {
 	key := taskKey{ClusterID: ClusterID, TaskID: taskID}
 	i.stateLock.Lock()
@@ -383,8 +384,29 @@ func (i *IndexNode) storeStatsResult(
 		info.numRows = numRows
 		info.insertLogs = insertLogs
 		info.statsLogs = statsLogs
-		info.textStatsLogs = fieldStatsLogs
+		info.bm25Logs = bm25Logs
 		return
+	}
+}
+
+func (i *IndexNode) storeStatsTextIndexResult(
+	ClusterID string,
+	taskID UniqueID,
+	collID UniqueID,
+	partID UniqueID,
+	segID UniqueID,
+	channel string,
+	texIndexLogs map[int64]*datapb.TextIndexStats,
+) {
+	key := taskKey{ClusterID: ClusterID, TaskID: taskID}
+	i.stateLock.Lock()
+	defer i.stateLock.Unlock()
+	if info, ok := i.statsTasks[key]; ok {
+		info.textStatsLogs = texIndexLogs
+		info.segID = segID
+		info.collID = collID
+		info.partID = partID
+		info.insertChannel = channel
 	}
 }
 
@@ -405,6 +427,7 @@ func (i *IndexNode) getStatsTaskInfo(clusterID string, taskID UniqueID) *statsTa
 			insertLogs:    info.insertLogs,
 			statsLogs:     info.statsLogs,
 			textStatsLogs: info.textStatsLogs,
+			bm25Logs:      info.bm25Logs,
 		}
 	}
 	return nil

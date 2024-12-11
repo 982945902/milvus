@@ -227,6 +227,8 @@ func Test_NewServer(t *testing.T) {
 
 	t.Run("Run", func(t *testing.T) {
 		server.datanode = &MockDataNode{}
+		err = server.Prepare()
+		assert.NoError(t, err)
 		err = server.Run()
 		assert.NoError(t, err)
 	})
@@ -335,13 +337,15 @@ func Test_NewServer(t *testing.T) {
 }
 
 func Test_Run(t *testing.T) {
+	paramtable.Init()
+
 	ctx := context.Background()
 	server, err := NewServer(ctx, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, server)
 
 	mockRootCoord := mocks.NewMockRootCoordClient(t)
-	mockRootCoord.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(&milvuspb.ComponentStates{
+	mockRootCoord.EXPECT().GetComponentStates(mock.Anything, mock.Anything, mock.Anything).Return(&milvuspb.ComponentStates{
 		State: &milvuspb.ComponentInfo{
 			StateCode: commonpb.StateCode_Healthy,
 		},
@@ -357,7 +361,7 @@ func Test_Run(t *testing.T) {
 	}
 
 	mockDataCoord := mocks.NewMockDataCoordClient(t)
-	mockDataCoord.EXPECT().GetComponentStates(mock.Anything, mock.Anything).Return(&milvuspb.ComponentStates{
+	mockDataCoord.EXPECT().GetComponentStates(mock.Anything, mock.Anything, mock.Anything).Return(&milvuspb.ComponentStates{
 		State: &milvuspb.ComponentInfo{
 			StateCode: commonpb.StateCode_Healthy,
 		},
@@ -376,6 +380,8 @@ func Test_Run(t *testing.T) {
 		regErr: errors.New("error"),
 	}
 
+	err = server.Prepare()
+	assert.NoError(t, err)
 	err = server.Run()
 	assert.Error(t, err)
 

@@ -20,10 +20,13 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"go.uber.org/zap"
@@ -36,6 +39,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/allocator"
+	mhttp "github.com/milvus-io/milvus/internal/http"
 	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
@@ -436,7 +440,7 @@ func TestProxy_FlushAll_DbCollection(t *testing.T) {
 			rpcRequestChannel := Params.CommonCfg.ReplicateMsgChannel.GetValue()
 			node.replicateMsgStream, err = node.factory.NewMsgStream(node.ctx)
 			assert.NoError(t, err)
-			node.replicateMsgStream.AsProducer([]string{rpcRequestChannel})
+			node.replicateMsgStream.AsProducer(ctx, []string{rpcRequestChannel})
 
 			Params.Save(Params.ProxyCfg.MaxTaskNum.Key, "1000")
 			node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
@@ -479,7 +483,7 @@ func TestProxy_FlushAll(t *testing.T) {
 	rpcRequestChannel := Params.CommonCfg.ReplicateMsgChannel.GetValue()
 	node.replicateMsgStream, err = node.factory.NewMsgStream(node.ctx)
 	assert.NoError(t, err)
-	node.replicateMsgStream.AsProducer([]string{rpcRequestChannel})
+	node.replicateMsgStream.AsProducer(ctx, []string{rpcRequestChannel})
 
 	Params.Save(Params.ProxyCfg.MaxTaskNum.Key, "1000")
 	node.sched, err = newTaskScheduler(ctx, node.tsoAllocator, node.factory)
@@ -951,7 +955,7 @@ func TestProxyCreateDatabase(t *testing.T) {
 	rpcRequestChannel := Params.CommonCfg.ReplicateMsgChannel.GetValue()
 	node.replicateMsgStream, err = node.factory.NewMsgStream(node.ctx)
 	assert.NoError(t, err)
-	node.replicateMsgStream.AsProducer([]string{rpcRequestChannel})
+	node.replicateMsgStream.AsProducer(ctx, []string{rpcRequestChannel})
 
 	t.Run("create database fail", func(t *testing.T) {
 		rc := mocks.NewMockRootCoordClient(t)
@@ -1011,7 +1015,7 @@ func TestProxyDropDatabase(t *testing.T) {
 	rpcRequestChannel := Params.CommonCfg.ReplicateMsgChannel.GetValue()
 	node.replicateMsgStream, err = node.factory.NewMsgStream(node.ctx)
 	assert.NoError(t, err)
-	node.replicateMsgStream.AsProducer([]string{rpcRequestChannel})
+	node.replicateMsgStream.AsProducer(ctx, []string{rpcRequestChannel})
 
 	t.Run("drop database fail", func(t *testing.T) {
 		rc := mocks.NewMockRootCoordClient(t)
@@ -1492,13 +1496,13 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 		factory := newMockMsgStreamFactory()
 		msgStreamObj := msgstream.NewMockMsgStream(t)
 		msgStreamObj.EXPECT().SetRepackFunc(mock.Anything).Return()
-		msgStreamObj.EXPECT().AsProducer(mock.Anything).Return()
+		msgStreamObj.EXPECT().AsProducer(mock.Anything, mock.Anything).Return()
 		msgStreamObj.EXPECT().EnableProduce(mock.Anything).Return()
 		msgStreamObj.EXPECT().Close().Return()
 		mockMsgID1 := mqcommon.NewMockMessageID(t)
 		mockMsgID2 := mqcommon.NewMockMessageID(t)
 		mockMsgID2.EXPECT().Serialize().Return([]byte("mock message id 2"))
-		broadcastMock := msgStreamObj.EXPECT().Broadcast(mock.Anything).Return(map[string][]mqcommon.MessageID{
+		broadcastMock := msgStreamObj.EXPECT().Broadcast(mock.Anything, mock.Anything).Return(map[string][]mqcommon.MessageID{
 			"unit_test_replicate_message": {mockMsgID1, mockMsgID2},
 		}, nil)
 
@@ -1577,7 +1581,7 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 
 		{
 			broadcastMock.Unset()
-			broadcastMock = msgStreamObj.EXPECT().Broadcast(mock.Anything).Return(nil, errors.New("mock error: broadcast"))
+			broadcastMock = msgStreamObj.EXPECT().Broadcast(mock.Anything, mock.Anything).Return(nil, errors.New("mock error: broadcast"))
 			resp, err := node.ReplicateMessage(context.TODO(), replicateRequest)
 			assert.NoError(t, err)
 			assert.NotEqualValues(t, 0, resp.GetStatus().GetCode())
@@ -1586,7 +1590,7 @@ func TestProxy_ReplicateMessage(t *testing.T) {
 		}
 		{
 			broadcastMock.Unset()
-			broadcastMock = msgStreamObj.EXPECT().Broadcast(mock.Anything).Return(map[string][]mqcommon.MessageID{
+			broadcastMock = msgStreamObj.EXPECT().Broadcast(mock.Anything, mock.Anything).Return(map[string][]mqcommon.MessageID{
 				"unit_test_replicate_message": {},
 			}, nil)
 			resp, err := node.ReplicateMessage(context.TODO(), replicateRequest)
@@ -1819,4 +1823,43 @@ func TestProxy_InvalidateShardLeaderCache(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, merr.Ok(resp))
 	})
+}
+
+func TestRegisterRestRouter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+
+	dc := mocks.NewMockDataCoordClient(t)
+	dc.EXPECT().GetMetrics(mock.Anything, mock.Anything).Return(nil, errors.New("error"))
+	qc := mocks.NewMockQueryCoordClient(t)
+	qc.EXPECT().GetMetrics(mock.Anything, mock.Anything).Return(nil, errors.New("error"))
+
+	proxy := &Proxy{
+		dataCoord:  dc,
+		queryCoord: qc,
+	}
+	proxy.RegisterRestRouter(router)
+
+	tests := []struct {
+		path       string
+		statusCode int
+	}{
+		{path: mhttp.QCTargetPath, statusCode: http.StatusInternalServerError},
+		{path: mhttp.QCDistPath, statusCode: http.StatusInternalServerError},
+		{path: mhttp.QCAllTasksPath, statusCode: http.StatusInternalServerError},
+		{path: mhttp.DNSyncTasksPath, statusCode: http.StatusInternalServerError},
+		{path: mhttp.DCCompactionTasksPath, statusCode: http.StatusInternalServerError},
+		{path: mhttp.DCImportTasksPath, statusCode: http.StatusInternalServerError},
+		{path: mhttp.DCBuildIndexTasksPath, statusCode: http.StatusInternalServerError},
+		{path: mhttp.DNSyncTasksPath, statusCode: http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", tt.path, nil)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			assert.Equal(t, tt.statusCode, w.Code)
+		})
+	}
 }

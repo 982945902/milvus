@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/cockroachdb/errors"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
@@ -108,6 +109,7 @@ func (suite *OpsServiceSuite) SetupTest() {
 		suite.dist,
 		suite.broker,
 		suite.cluster,
+		suite.nodeMgr,
 	)
 	suite.cluster = session.NewMockCluster(suite.T())
 	suite.jobScheduler = job.NewScheduler()
@@ -438,8 +440,8 @@ func (suite *OpsServiceSuite) TestSuspendAndResumeNode() {
 		Address:  "localhost",
 		Hostname: "localhost",
 	}))
-	suite.meta.ResourceManager.HandleNodeUp(1)
-	nodes, err := suite.meta.ResourceManager.GetNodes(meta.DefaultResourceGroupName)
+	suite.meta.ResourceManager.HandleNodeUp(ctx, 1)
+	nodes, err := suite.meta.ResourceManager.GetNodes(ctx, meta.DefaultResourceGroupName)
 	suite.NoError(err)
 	suite.Contains(nodes, int64(1))
 	// test success
@@ -449,7 +451,7 @@ func (suite *OpsServiceSuite) TestSuspendAndResumeNode() {
 	})
 	suite.NoError(err)
 	suite.True(merr.Ok(resp))
-	nodes, err = suite.meta.ResourceManager.GetNodes(meta.DefaultResourceGroupName)
+	nodes, err = suite.meta.ResourceManager.GetNodes(ctx, meta.DefaultResourceGroupName)
 	suite.NoError(err)
 	suite.NotContains(nodes, int64(1))
 
@@ -458,7 +460,7 @@ func (suite *OpsServiceSuite) TestSuspendAndResumeNode() {
 	})
 	suite.NoError(err)
 	suite.True(merr.Ok(resp))
-	nodes, err = suite.meta.ResourceManager.GetNodes(meta.DefaultResourceGroupName)
+	nodes, err = suite.meta.ResourceManager.GetNodes(ctx, meta.DefaultResourceGroupName)
 	suite.NoError(err)
 	suite.Contains(nodes, int64(1))
 }
@@ -490,10 +492,10 @@ func (suite *OpsServiceSuite) TestTransferSegment() {
 	replicaID := int64(1)
 	nodes := []int64{1, 2, 3, 4}
 	replica := utils.CreateTestReplica(replicaID, collectionID, nodes)
-	suite.meta.ReplicaManager.Put(replica)
+	suite.meta.ReplicaManager.Put(ctx, replica)
 	collection := utils.CreateTestCollection(collectionID, 1)
 	partition := utils.CreateTestPartition(partitionID, collectionID)
-	suite.meta.PutCollection(collection, partition)
+	suite.meta.PutCollection(ctx, collection, partition)
 	segmentIDs := []int64{1, 2, 3, 4}
 	channelNames := []string{"channel-1", "channel-2", "channel-3", "channel-4"}
 
@@ -592,8 +594,8 @@ func (suite *OpsServiceSuite) TestTransferSegment() {
 	suite.True(merr.Ok(resp))
 
 	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, collectionID).Return(channels, segments, nil)
-	suite.targetMgr.UpdateCollectionNextTarget(1)
-	suite.targetMgr.UpdateCollectionCurrentTarget(1)
+	suite.targetMgr.UpdateCollectionNextTarget(ctx, 1)
+	suite.targetMgr.UpdateCollectionCurrentTarget(ctx, 1)
 	suite.dist.SegmentDistManager.Update(1, segmentInfos...)
 	suite.dist.ChannelDistManager.Update(1, chanenlInfos...)
 
@@ -603,7 +605,7 @@ func (suite *OpsServiceSuite) TestTransferSegment() {
 			Address:  "localhost",
 			Hostname: "localhost",
 		}))
-		suite.meta.ResourceManager.HandleNodeUp(node)
+		suite.meta.ResourceManager.HandleNodeUp(ctx, node)
 	}
 
 	// test transfer segment success, expect generate 1 balance segment task
@@ -683,6 +685,33 @@ func (suite *OpsServiceSuite) TestTransferSegment() {
 	suite.True(merr.Ok(resp))
 	suite.Equal(counter.Load(), int64(4))
 	suite.Len(nodeSet.Collect(), 3)
+
+	// test transfer segment idempotent
+	suite.taskScheduler.ExpectedCalls = nil
+	suite.taskScheduler.EXPECT().GetSegmentTaskDelta(mock.Anything, mock.Anything).Return(0).Maybe()
+	suite.taskScheduler.EXPECT().GetChannelTaskDelta(mock.Anything, mock.Anything).Return(0).Maybe()
+	counter = atomic.NewInt64(0)
+	taskIDSet := typeutil.NewUniqueSet()
+	suite.taskScheduler.EXPECT().Add(mock.Anything).RunAndReturn(func(t task.Task) error {
+		if taskIDSet.Contain(t.ID()) {
+			return errors.New("duplicate task")
+		}
+		return nil
+	})
+	resp, err = suite.server.TransferSegment(ctx, &querypb.TransferSegmentRequest{
+		SourceNodeID: nodes[0],
+		TransferAll:  true,
+		ToAllNodes:   true,
+	})
+	suite.NoError(err)
+	suite.True(merr.Ok(resp))
+	resp, err = suite.server.TransferSegment(ctx, &querypb.TransferSegmentRequest{
+		SourceNodeID: nodes[0],
+		TransferAll:  true,
+		ToAllNodes:   true,
+	})
+	suite.NoError(err)
+	suite.True(merr.Ok(resp))
 }
 
 func (suite *OpsServiceSuite) TestTransferChannel() {
@@ -712,10 +741,10 @@ func (suite *OpsServiceSuite) TestTransferChannel() {
 	replicaID := int64(1)
 	nodes := []int64{1, 2, 3, 4}
 	replica := utils.CreateTestReplica(replicaID, collectionID, nodes)
-	suite.meta.ReplicaManager.Put(replica)
+	suite.meta.ReplicaManager.Put(ctx, replica)
 	collection := utils.CreateTestCollection(collectionID, 1)
 	partition := utils.CreateTestPartition(partitionID, collectionID)
-	suite.meta.PutCollection(collection, partition)
+	suite.meta.PutCollection(ctx, collection, partition)
 	segmentIDs := []int64{1, 2, 3, 4}
 	channelNames := []string{"channel-1", "channel-2", "channel-3", "channel-4"}
 
@@ -816,8 +845,8 @@ func (suite *OpsServiceSuite) TestTransferChannel() {
 	suite.True(merr.Ok(resp))
 
 	suite.broker.EXPECT().GetRecoveryInfoV2(mock.Anything, collectionID).Return(channels, segments, nil)
-	suite.targetMgr.UpdateCollectionNextTarget(1)
-	suite.targetMgr.UpdateCollectionCurrentTarget(1)
+	suite.targetMgr.UpdateCollectionNextTarget(ctx, 1)
+	suite.targetMgr.UpdateCollectionCurrentTarget(ctx, 1)
 	suite.dist.SegmentDistManager.Update(1, segmentInfos...)
 	suite.dist.ChannelDistManager.Update(1, chanenlInfos...)
 
@@ -827,7 +856,7 @@ func (suite *OpsServiceSuite) TestTransferChannel() {
 			Address:  "localhost",
 			Hostname: "localhost",
 		}))
-		suite.meta.ResourceManager.HandleNodeUp(node)
+		suite.meta.ResourceManager.HandleNodeUp(ctx, node)
 	}
 
 	// test transfer channel success, expect generate 1 balance channel task
@@ -907,6 +936,34 @@ func (suite *OpsServiceSuite) TestTransferChannel() {
 	suite.True(merr.Ok(resp))
 	suite.Equal(counter.Load(), int64(4))
 	suite.Len(nodeSet.Collect(), 3)
+
+	// test transfer channel idempotent
+	suite.taskScheduler.ExpectedCalls = nil
+	suite.taskScheduler.EXPECT().GetSegmentTaskDelta(mock.Anything, mock.Anything).Return(0).Maybe()
+	suite.taskScheduler.EXPECT().GetChannelTaskDelta(mock.Anything, mock.Anything).Return(0).Maybe()
+	counter = atomic.NewInt64(0)
+	taskIDSet := typeutil.NewUniqueSet()
+	suite.taskScheduler.EXPECT().Add(mock.Anything).RunAndReturn(func(t task.Task) error {
+		if taskIDSet.Contain(t.ID()) {
+			return errors.New("duplicate task")
+		}
+		return nil
+	})
+
+	resp, err = suite.server.TransferChannel(ctx, &querypb.TransferChannelRequest{
+		SourceNodeID: nodes[0],
+		TransferAll:  true,
+		ToAllNodes:   true,
+	})
+	suite.NoError(err)
+	suite.True(merr.Ok(resp))
+	resp, err = suite.server.TransferChannel(ctx, &querypb.TransferChannelRequest{
+		SourceNodeID: nodes[0],
+		TransferAll:  true,
+		ToAllNodes:   true,
+	})
+	suite.NoError(err)
+	suite.True(merr.Ok(resp))
 }
 
 func TestOpsService(t *testing.T) {

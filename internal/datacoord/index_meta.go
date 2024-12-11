@@ -22,23 +22,31 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
-	"github.com/golang/protobuf/proto"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/lo"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
+	"github.com/milvus-io/milvus/internal/json"
 	"github.com/milvus-io/milvus/internal/metastore"
 	"github.com/milvus-io/milvus/internal/metastore/model"
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/workerpb"
+	"github.com/milvus-io/milvus/internal/util/indexparamcheck"
+	"github.com/milvus-io/milvus/internal/util/vecindexmgr"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
-	"github.com/milvus-io/milvus/pkg/util/indexparamcheck"
+	"github.com/milvus-io/milvus/pkg/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/util/indexparams"
+	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/timerecord"
+	"github.com/milvus-io/milvus/pkg/util/tsoutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
@@ -50,22 +58,76 @@ type indexMeta struct {
 	// collectionIndexes records which indexes are on the collection
 	// collID -> indexID -> index
 	indexes map[UniqueID]map[UniqueID]*model.Index
-	// buildID2Meta records the meta information of the segment
-	// buildID -> segmentIndex
-	buildID2SegmentIndex map[UniqueID]*model.SegmentIndex
+
+	// buildID2Meta records building index meta information of the segment
+	segmentBuildInfo *segmentBuildInfo
 
 	// segmentID -> indexID -> segmentIndex
 	segmentIndexes map[UniqueID]map[UniqueID]*model.SegmentIndex
 }
 
+func newIndexTaskStats(s *model.SegmentIndex) *metricsinfo.IndexTaskStats {
+	return &metricsinfo.IndexTaskStats{
+		IndexID:         s.IndexID,
+		CollectionID:    s.CollectionID,
+		SegmentID:       s.SegmentID,
+		BuildID:         s.BuildID,
+		IndexState:      s.IndexState.String(),
+		FailReason:      s.FailReason,
+		IndexSize:       s.IndexSize,
+		IndexVersion:    s.IndexVersion,
+		CreatedUTCTime:  typeutil.TimestampToString(s.CreatedUTCTime),
+		FinishedUTCTime: typeutil.TimestampToString(s.FinishedUTCTime),
+	}
+}
+
+type segmentBuildInfo struct {
+	// buildID2Meta records the meta information of the segment
+	// buildID -> segmentIndex
+	buildID2SegmentIndex map[UniqueID]*model.SegmentIndex
+	// taskStats records the task stats of the segment
+	taskStats *expirable.LRU[UniqueID, *metricsinfo.IndexTaskStats]
+}
+
+func newSegmentIndexBuildInfo() *segmentBuildInfo {
+	return &segmentBuildInfo{
+		// build ID -> segment index
+		buildID2SegmentIndex: make(map[UniqueID]*model.SegmentIndex),
+		// build ID -> task stats
+		taskStats: expirable.NewLRU[UniqueID, *metricsinfo.IndexTaskStats](64, nil, time.Minute*30),
+	}
+}
+
+func (m *segmentBuildInfo) Add(segIdx *model.SegmentIndex) {
+	m.buildID2SegmentIndex[segIdx.BuildID] = segIdx
+	m.taskStats.Add(segIdx.BuildID, newIndexTaskStats(segIdx))
+}
+
+func (m *segmentBuildInfo) Get(key UniqueID) (*model.SegmentIndex, bool) {
+	value, exists := m.buildID2SegmentIndex[key]
+	return value, exists
+}
+
+func (m *segmentBuildInfo) Remove(key UniqueID) {
+	delete(m.buildID2SegmentIndex, key)
+}
+
+func (m *segmentBuildInfo) List() map[UniqueID]*model.SegmentIndex {
+	return m.buildID2SegmentIndex
+}
+
+func (m *segmentBuildInfo) GetTaskStats() []*metricsinfo.IndexTaskStats {
+	return m.taskStats.Values()
+}
+
 // NewMeta creates meta from provided `kv.TxnKV`
 func newIndexMeta(ctx context.Context, catalog metastore.DataCoordCatalog) (*indexMeta, error) {
 	mt := &indexMeta{
-		ctx:                  ctx,
-		catalog:              catalog,
-		indexes:              make(map[UniqueID]map[UniqueID]*model.Index),
-		buildID2SegmentIndex: make(map[UniqueID]*model.SegmentIndex),
-		segmentIndexes:       make(map[UniqueID]map[UniqueID]*model.SegmentIndex),
+		ctx:              ctx,
+		catalog:          catalog,
+		indexes:          make(map[UniqueID]map[UniqueID]*model.Index),
+		segmentBuildInfo: newSegmentIndexBuildInfo(),
+		segmentIndexes:   make(map[UniqueID]map[UniqueID]*model.SegmentIndex),
 	}
 	err := mt.reloadFromKV()
 	if err != nil {
@@ -114,7 +176,7 @@ func (m *indexMeta) updateSegmentIndex(segIdx *model.SegmentIndex) {
 		m.segmentIndexes[segIdx.SegmentID] = make(map[UniqueID]*model.SegmentIndex)
 		m.segmentIndexes[segIdx.SegmentID][segIdx.IndexID] = segIdx
 	}
-	m.buildID2SegmentIndex[segIdx.BuildID] = segIdx
+	m.segmentBuildInfo.Add(segIdx)
 }
 
 func (m *indexMeta) alterSegmentIndexes(segIdxes []*model.SegmentIndex) error {
@@ -140,7 +202,7 @@ func (m *indexMeta) updateSegIndexMeta(segIdx *model.SegmentIndex, updateFunc fu
 
 func (m *indexMeta) updateIndexTasksMetrics() {
 	taskMetrics := make(map[UniqueID]map[commonpb.IndexState]int)
-	for _, segIdx := range m.buildID2SegmentIndex {
+	for _, segIdx := range m.segmentBuildInfo.List() {
 		if segIdx.IsDeleted {
 			continue
 		}
@@ -191,21 +253,21 @@ func checkParams(fieldIndex *model.Index, req *indexpb.CreateIndexRequest) bool 
 	}
 
 	useAutoIndex := false
-	userIndexParamsWithoutMmapKey := make([]*commonpb.KeyValuePair, 0)
+	userIndexParamsWithoutConfigableKey := make([]*commonpb.KeyValuePair, 0)
 	for _, param := range fieldIndex.UserIndexParams {
-		if param.Key == common.MmapEnabledKey {
+		if indexparams.IsConfigableIndexParam(param.Key) {
 			continue
 		}
 		if param.Key == common.IndexTypeKey && param.Value == common.AutoIndexName {
 			useAutoIndex = true
 		}
-		userIndexParamsWithoutMmapKey = append(userIndexParamsWithoutMmapKey, param)
+		userIndexParamsWithoutConfigableKey = append(userIndexParamsWithoutConfigableKey, param)
 	}
 
-	if len(userIndexParamsWithoutMmapKey) != len(req.GetUserIndexParams()) {
+	if len(userIndexParamsWithoutConfigableKey) != len(req.GetUserIndexParams()) {
 		return false
 	}
-	for _, param1 := range userIndexParamsWithoutMmapKey {
+	for _, param1 := range userIndexParamsWithoutConfigableKey {
 		exist := false
 		for i, param2 := range req.GetUserIndexParams() {
 			if param2.Key == param1.Key && param2.Value == param1.Value {
@@ -313,13 +375,13 @@ func (m *indexMeta) HasSameReq(req *indexpb.CreateIndexRequest) (bool, UniqueID)
 	return false, 0
 }
 
-func (m *indexMeta) CreateIndex(index *model.Index) error {
+func (m *indexMeta) CreateIndex(ctx context.Context, index *model.Index) error {
 	log.Info("meta update: CreateIndex", zap.Int64("collectionID", index.CollectionID),
 		zap.Int64("fieldID", index.FieldID), zap.Int64("indexID", index.IndexID), zap.String("indexName", index.IndexName))
 	m.Lock()
 	defer m.Unlock()
 
-	if err := m.catalog.CreateIndex(m.ctx, index); err != nil {
+	if err := m.catalog.CreateIndex(ctx, index); err != nil {
 		log.Error("meta update: CreateIndex save meta fail", zap.Int64("collectionID", index.CollectionID),
 			zap.Int64("fieldID", index.FieldID), zap.Int64("indexID", index.IndexID),
 			zap.String("indexName", index.IndexName), zap.Error(err))
@@ -349,7 +411,7 @@ func (m *indexMeta) AlterIndex(ctx context.Context, indexes ...*model.Index) err
 }
 
 // AddSegmentIndex adds the index meta corresponding the indexBuildID to meta table.
-func (m *indexMeta) AddSegmentIndex(segIndex *model.SegmentIndex) error {
+func (m *indexMeta) AddSegmentIndex(ctx context.Context, segIndex *model.SegmentIndex) error {
 	m.Lock()
 	defer m.Unlock()
 
@@ -359,7 +421,7 @@ func (m *indexMeta) AddSegmentIndex(segIndex *model.SegmentIndex) error {
 		zap.Int64("buildID", buildID))
 
 	segIndex.IndexState = commonpb.IndexState_Unissued
-	if err := m.catalog.CreateSegmentIndex(m.ctx, segIndex); err != nil {
+	if err := m.catalog.CreateSegmentIndex(ctx, segIndex); err != nil {
 		log.Warn("meta update: adding segment index failed",
 			zap.Int64("segmentID", segIndex.SegmentID), zap.Int64("indexID", segIndex.IndexID),
 			zap.Int64("buildID", segIndex.BuildID), zap.Error(err))
@@ -500,7 +562,7 @@ func (m *indexMeta) GetFieldIndexes(collID, fieldID UniqueID, indexName string) 
 }
 
 // MarkIndexAsDeleted will mark the corresponding index as deleted, and recycleUnusedIndexFiles will recycle these tasks.
-func (m *indexMeta) MarkIndexAsDeleted(collID UniqueID, indexIDs []UniqueID) error {
+func (m *indexMeta) MarkIndexAsDeleted(ctx context.Context, collID UniqueID, indexIDs []UniqueID) error {
 	log.Info("IndexCoord metaTable MarkIndexAsDeleted", zap.Int64("collectionID", collID),
 		zap.Int64s("indexIDs", indexIDs))
 
@@ -524,7 +586,7 @@ func (m *indexMeta) MarkIndexAsDeleted(collID UniqueID, indexIDs []UniqueID) err
 	if len(indexes) == 0 {
 		return nil
 	}
-	err := m.catalog.AlterIndexes(m.ctx, indexes)
+	err := m.catalog.AlterIndexes(ctx, indexes)
 	if err != nil {
 		log.Error("failed to alter index meta in meta store", zap.Int("indexes num", len(indexes)), zap.Error(err))
 		return err
@@ -564,26 +626,24 @@ func (m *indexMeta) IsUnIndexedSegment(collectionID UniqueID, segID UniqueID) bo
 	return false
 }
 
-func (m *indexMeta) getSegmentIndexes(segID UniqueID) map[UniqueID]*model.SegmentIndex {
+func (m *indexMeta) GetSegmentsIndexes(collectionID UniqueID, segIDs []UniqueID) map[int64]map[UniqueID]*model.SegmentIndex {
 	m.RLock()
 	defer m.RUnlock()
-
-	ret := make(map[UniqueID]*model.SegmentIndex, 0)
-	segIndexInfos, ok := m.segmentIndexes[segID]
-	if !ok || len(segIndexInfos) == 0 {
-		return ret
+	segmentsIndexes := make(map[int64]map[UniqueID]*model.SegmentIndex)
+	for _, segmentID := range segIDs {
+		segmentsIndexes[segmentID] = m.getSegmentIndexes(collectionID, segmentID)
 	}
-
-	for _, segIdx := range segIndexInfos {
-		ret[segIdx.IndexID] = model.CloneSegmentIndex(segIdx)
-	}
-	return ret
+	return segmentsIndexes
 }
 
 func (m *indexMeta) GetSegmentIndexes(collectionID UniqueID, segID UniqueID) map[UniqueID]*model.SegmentIndex {
 	m.RLock()
 	defer m.RUnlock()
+	return m.getSegmentIndexes(collectionID, segID)
+}
 
+// Note: thread-unsafe, don't call it outside indexMeta
+func (m *indexMeta) getSegmentIndexes(collectionID UniqueID, segID UniqueID) map[UniqueID]*model.SegmentIndex {
 	ret := make(map[UniqueID]*model.SegmentIndex, 0)
 	segIndexInfos, ok := m.segmentIndexes[segID]
 	if !ok || len(segIndexInfos) == 0 {
@@ -672,7 +732,7 @@ func (m *indexMeta) GetIndexJob(buildID UniqueID) (*model.SegmentIndex, bool) {
 	m.RLock()
 	defer m.RUnlock()
 
-	segIdx, ok := m.buildID2SegmentIndex[buildID]
+	segIdx, ok := m.segmentBuildInfo.Get(buildID)
 	if ok {
 		return model.CloneSegmentIndex(segIdx), true
 	}
@@ -696,18 +756,19 @@ func (m *indexMeta) IsIndexExist(collID, indexID UniqueID) bool {
 }
 
 // UpdateVersion updates the version and nodeID of the index meta, whenever the task is built once, the version will be updated once.
-func (m *indexMeta) UpdateVersion(buildID UniqueID) error {
+func (m *indexMeta) UpdateVersion(buildID, nodeID UniqueID) error {
 	m.Lock()
 	defer m.Unlock()
 
-	log.Debug("IndexCoord metaTable UpdateVersion receive", zap.Int64("buildID", buildID))
-	segIdx, ok := m.buildID2SegmentIndex[buildID]
+	log.Info("IndexCoord metaTable UpdateVersion receive", zap.Int64("buildID", buildID), zap.Int64("nodeID", nodeID))
+	segIdx, ok := m.segmentBuildInfo.Get(buildID)
 	if !ok {
 		return fmt.Errorf("there is no index with buildID: %d", buildID)
 	}
 
 	updateFunc := func(segIdx *model.SegmentIndex) error {
 		segIdx.IndexVersion++
+		segIdx.NodeID = nodeID
 		return m.alterSegmentIndexes([]*model.SegmentIndex{segIdx})
 	}
 
@@ -718,7 +779,7 @@ func (m *indexMeta) FinishTask(taskInfo *workerpb.IndexTaskInfo) error {
 	m.Lock()
 	defer m.Unlock()
 
-	segIdx, ok := m.buildID2SegmentIndex[taskInfo.GetBuildID()]
+	segIdx, ok := m.segmentBuildInfo.Get(taskInfo.GetBuildID())
 	if !ok {
 		log.Warn("there is no index with buildID", zap.Int64("buildID", taskInfo.GetBuildID()))
 		return nil
@@ -729,6 +790,7 @@ func (m *indexMeta) FinishTask(taskInfo *workerpb.IndexTaskInfo) error {
 		segIdx.FailReason = taskInfo.GetFailReason()
 		segIdx.IndexSize = taskInfo.GetSerializedSize()
 		segIdx.CurrentIndexVersion = taskInfo.GetCurrentIndexVersion()
+		segIdx.FinishedUTCTime = uint64(time.Now().Unix())
 		return m.alterSegmentIndexes([]*model.SegmentIndex{segIdx})
 	}
 
@@ -749,7 +811,7 @@ func (m *indexMeta) DeleteTask(buildID int64) error {
 	m.Lock()
 	defer m.Unlock()
 
-	segIdx, ok := m.buildID2SegmentIndex[buildID]
+	segIdx, ok := m.segmentBuildInfo.Get(buildID)
 	if !ok {
 		log.Warn("there is no index with buildID", zap.Int64("buildID", buildID))
 		return nil
@@ -770,17 +832,16 @@ func (m *indexMeta) DeleteTask(buildID int64) error {
 }
 
 // BuildIndex set the index state to be InProgress. It means IndexNode is building the index.
-func (m *indexMeta) BuildIndex(buildID, nodeID UniqueID) error {
+func (m *indexMeta) BuildIndex(buildID UniqueID) error {
 	m.Lock()
 	defer m.Unlock()
 
-	segIdx, ok := m.buildID2SegmentIndex[buildID]
+	segIdx, ok := m.segmentBuildInfo.Get(buildID)
 	if !ok {
 		return fmt.Errorf("there is no index with buildID: %d", buildID)
 	}
 
 	updateFunc := func(segIdx *model.SegmentIndex) error {
-		segIdx.NodeID = nodeID
 		segIdx.IndexState = commonpb.IndexState_InProgress
 
 		err := m.alterSegmentIndexes([]*model.SegmentIndex{segIdx})
@@ -804,18 +865,38 @@ func (m *indexMeta) GetAllSegIndexes() map[int64]*model.SegmentIndex {
 	m.RLock()
 	defer m.RUnlock()
 
-	segIndexes := make(map[int64]*model.SegmentIndex, len(m.buildID2SegmentIndex))
-	for buildID, segIndex := range m.buildID2SegmentIndex {
+	tasks := m.segmentBuildInfo.List()
+	segIndexes := make(map[int64]*model.SegmentIndex, len(tasks))
+	for buildID, segIndex := range tasks {
 		segIndexes[buildID] = model.CloneSegmentIndex(segIndex)
 	}
 	return segIndexes
 }
 
-func (m *indexMeta) RemoveSegmentIndex(collID, partID, segID, indexID, buildID UniqueID) error {
+// SetStoredIndexFileSizeMetric returns the total index files size of all segment for each collection.
+func (m *indexMeta) SetStoredIndexFileSizeMetric(collections map[UniqueID]*collectionInfo) uint64 {
+	m.RLock()
+	defer m.RUnlock()
+
+	var total uint64
+	metrics.DataCoordStoredIndexFilesSize.Reset()
+
+	for _, segmentIdx := range m.segmentBuildInfo.List() {
+		coll, ok := collections[segmentIdx.CollectionID]
+		if ok {
+			metrics.DataCoordStoredIndexFilesSize.WithLabelValues(coll.DatabaseName, coll.Schema.GetName(),
+				fmt.Sprint(segmentIdx.CollectionID)).Add(float64(segmentIdx.IndexSize))
+			total += segmentIdx.IndexSize
+		}
+	}
+	return total
+}
+
+func (m *indexMeta) RemoveSegmentIndex(ctx context.Context, collID, partID, segID, indexID, buildID UniqueID) error {
 	m.Lock()
 	defer m.Unlock()
 
-	err := m.catalog.DropSegmentIndex(m.ctx, collID, partID, segID, buildID)
+	err := m.catalog.DropSegmentIndex(ctx, collID, partID, segID, buildID)
 	if err != nil {
 		return err
 	}
@@ -828,7 +909,7 @@ func (m *indexMeta) RemoveSegmentIndex(collID, partID, segID, indexID, buildID U
 		delete(m.segmentIndexes, segID)
 	}
 
-	delete(m.buildID2SegmentIndex, buildID)
+	m.segmentBuildInfo.Remove(buildID)
 	m.updateIndexTasksMetrics()
 	return nil
 }
@@ -848,11 +929,11 @@ func (m *indexMeta) GetDeletedIndexes() []*model.Index {
 	return deletedIndexes
 }
 
-func (m *indexMeta) RemoveIndex(collID, indexID UniqueID) error {
+func (m *indexMeta) RemoveIndex(ctx context.Context, collID, indexID UniqueID) error {
 	m.Lock()
 	defer m.Unlock()
 	log.Info("IndexCoord meta table remove index", zap.Int64("collectionID", collID), zap.Int64("indexID", indexID))
-	err := m.catalog.DropIndex(m.ctx, collID, indexID)
+	err := m.catalog.DropIndex(ctx, collID, indexID)
 	if err != nil {
 		log.Info("IndexCoord meta table remove index fail", zap.Int64("collectionID", collID),
 			zap.Int64("indexID", indexID), zap.Error(err))
@@ -875,7 +956,7 @@ func (m *indexMeta) CheckCleanSegmentIndex(buildID UniqueID) (bool, *model.Segme
 	m.RLock()
 	defer m.RUnlock()
 
-	if segIndex, ok := m.buildID2SegmentIndex[buildID]; ok {
+	if segIndex, ok := m.segmentBuildInfo.Get(buildID); ok {
 		if segIndex.IndexState == commonpb.IndexState_Finished {
 			return true, model.CloneSegmentIndex(segIndex)
 		}
@@ -889,7 +970,7 @@ func (m *indexMeta) GetMetasByNodeID(nodeID UniqueID) []*model.SegmentIndex {
 	defer m.RUnlock()
 
 	metas := make([]*model.SegmentIndex, 0)
-	for _, segIndex := range m.buildID2SegmentIndex {
+	for _, segIndex := range m.segmentBuildInfo.List() {
 		if segIndex.IsDeleted {
 			continue
 		}
@@ -960,11 +1041,103 @@ func (m *indexMeta) AreAllDiskIndex(collectionID int64, schema *schemapb.Collect
 	})
 	vectorFieldsWithDiskIndex := lo.Filter(vectorFields, func(field *schemapb.FieldSchema, _ int) bool {
 		if indexType, ok := fieldIndexTypes[field.FieldID]; ok {
-			return indexparamcheck.IsDiskIndex(indexType)
+			return vecindexmgr.GetVecIndexMgrInstance().IsDiskVecIndex(indexType)
 		}
 		return false
 	})
 
 	allDiskIndex := len(vectorFields) == len(vectorFieldsWithDiskIndex)
 	return allDiskIndex
+}
+
+func (m *indexMeta) HasIndex(collectionID int64) bool {
+	m.RLock()
+	defer m.RUnlock()
+	indexes, ok := m.indexes[collectionID]
+	if ok {
+		for _, index := range indexes {
+			if !index.IsDeleted {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m *indexMeta) TaskStatsJSON() string {
+	tasks := m.segmentBuildInfo.GetTaskStats()
+	ret, err := json.Marshal(tasks)
+	if err != nil {
+		return ""
+	}
+	return string(ret)
+}
+
+func (m *indexMeta) GetIndexJSON(collectionID int64) string {
+	m.RLock()
+	defer m.RUnlock()
+
+	var indexMetrics []*metricsinfo.Index
+	for collID, indexes := range m.indexes {
+		for _, index := range indexes {
+			if collectionID == 0 || collID == collectionID {
+				im := &metricsinfo.Index{
+					CollectionID:    collID,
+					IndexID:         index.IndexID,
+					FieldID:         index.FieldID,
+					Name:            index.IndexName,
+					IsDeleted:       index.IsDeleted,
+					CreateTime:      tsoutil.PhysicalTimeFormat(index.CreateTime),
+					IndexParams:     funcutil.KeyValuePair2Map(index.IndexParams),
+					IsAutoIndex:     index.IsAutoIndex,
+					UserIndexParams: funcutil.KeyValuePair2Map(index.UserIndexParams),
+				}
+				indexMetrics = append(indexMetrics, im)
+			}
+		}
+	}
+
+	ret, err := json.Marshal(indexMetrics)
+	if err != nil {
+		return ""
+	}
+	return string(ret)
+}
+
+func (m *indexMeta) GetSegmentIndexedFields(collectionID UniqueID, segmentID UniqueID) (bool, []*metricsinfo.IndexedField) {
+	m.RLock()
+	defer m.RUnlock()
+	fieldIndexes, ok := m.indexes[collectionID]
+	if !ok {
+		// the segment should be unindexed status if the collection has no indexes
+		return false, []*metricsinfo.IndexedField{}
+	}
+
+	// the segment should be unindexed status if the segment indexes is not found
+	segIndexInfos, ok := m.segmentIndexes[segmentID]
+	if !ok || len(segIndexInfos) == 0 {
+		return false, []*metricsinfo.IndexedField{}
+	}
+
+	isIndexed := true
+	var segmentIndexes []*metricsinfo.IndexedField
+	for _, index := range fieldIndexes {
+		if si, ok := segIndexInfos[index.IndexID]; !index.IsDeleted {
+			buildID := int64(-1)
+			if !ok {
+				// the segment should be unindexed status if the segment index is not found within field indexes
+				isIndexed = false
+			} else {
+				buildID = si.BuildID
+			}
+
+			segmentIndexes = append(segmentIndexes, &metricsinfo.IndexedField{
+				IndexFieldID: index.IndexID,
+				IndexID:      index.IndexID,
+				BuildID:      buildID,
+				IndexSize:    int64(si.IndexSize),
+			})
+		}
+	}
+	return isIndexed, segmentIndexes
 }

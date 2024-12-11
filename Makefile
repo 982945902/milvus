@@ -28,10 +28,10 @@ ifdef disk_index
 endif
 
 use_asan = OFF
-ifdef USE_ASAN
-	use_asan =${USE_ASAN}
-	CGO_LDFLAGS := $(shell go env CGO_LDFLAGS) -fsanitize=address -fno-omit-frame-pointer
-	CGO_CFLAGS := $(shell go env CGO_CFLAGS) -fsanitize=address -fno-omit-frame-pointer
+ifeq ($(USE_ASAN), ON)
+	use_asan = ${USE_ASAN}
+	CGO_LDFLAGS := $(shell go env CGO_LDFLAGS) -fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -fsanitize=address
+	CGO_CFLAGS := $(shell go env CGO_CFLAGS) -fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -fsanitize=address
 	MILVUS_GO_BUILD_TAGS := $(MILVUS_GO_BUILD_TAGS),use_asan
 endif
 
@@ -49,7 +49,7 @@ GOLANGCI_LINT_VERSION := 1.55.2
 GOLANGCI_LINT_OUTPUT := $(shell $(INSTALL_PATH)/golangci-lint --version 2>/dev/null)
 INSTALL_GOLANGCI_LINT := $(findstring $(GOLANGCI_LINT_VERSION), $(GOLANGCI_LINT_OUTPUT))
 # mockery
-MOCKERY_VERSION := 2.32.4
+MOCKERY_VERSION := 2.46.0
 MOCKERY_OUTPUT := $(shell $(INSTALL_PATH)/mockery --version 2>/dev/null)
 INSTALL_MOCKERY := $(findstring $(MOCKERY_VERSION),$(MOCKERY_OUTPUT))
 # gci
@@ -268,7 +268,7 @@ build-cpp-gpu: generated-proto
 
 build-cpp-with-unittest: generated-proto
 	@echo "Building Milvus cpp library with unittest ... "
-	@(env bash $(PWD)/scripts/core_build.sh -t ${mode} -u -n ${use_disk_index} -y ${use_dynamic_simd} ${AZURE_OPTION} -x ${index_engine} -o ${use_opendal})
+	@(env bash $(PWD)/scripts/core_build.sh -t ${mode} -a ${use_asan} -u -n ${use_disk_index} -y ${use_dynamic_simd} ${AZURE_OPTION} -x ${index_engine} -o ${use_opendal})
 
 build-cpp-with-coverage: generated-proto
 	@echo "Building Milvus cpp library with coverage and unittest ..."
@@ -384,12 +384,12 @@ codecov-cpp: build-cpp-with-coverage
 # Build each component and install binary to $GOPATH/bin.
 install: milvus
 	@echo "Installing binary to './bin'"
-	@(env USE_ASAN=$(USE_ASAN) GOPATH=$(GOPATH) LIBRARY_PATH=$(LIBRARY_PATH) bash $(PWD)/scripts/install_milvus.sh)
+	@(env GOPATH=$(GOPATH) LIBRARY_PATH=$(LIBRARY_PATH) bash $(PWD)/scripts/install_milvus.sh)
 	@echo "Installation successful."
 
 gpu-install: milvus-gpu
 	@echo "Installing binary to './bin'"
-	@(env USE_ASAN=$(USE_ASAN) GOPATH=$(GOPATH) LIBRARY_PATH=$(LIBRARY_PATH) bash $(PWD)/scripts/install_milvus.sh)
+	@(env GOPATH=$(GOPATH) LIBRARY_PATH=$(LIBRARY_PATH) bash $(PWD)/scripts/install_milvus.sh)
 	@echo "Installation successful."
 
 clean:
@@ -463,24 +463,13 @@ generate-mockery-proxy: getdeps
 	$(INSTALL_PATH)/mockery --name=channelsMgr --dir=$(PWD)/internal/proxy --output=$(PWD)/internal/proxy --filename=mock_channels_manager.go --structname=MockChannelsMgr --with-expecter --outpkg=proxy --inpackage
 
 generate-mockery-querycoord: getdeps
-	$(INSTALL_PATH)/mockery --name=QueryNodeServer --dir=$(PWD)/internal/proto/querypb/ --output=$(PWD)/internal/querycoordv2/mocks --filename=mock_querynode.go --with-expecter --structname=MockQueryNodeServer
-	$(INSTALL_PATH)/mockery --name=Broker --dir=$(PWD)/internal/querycoordv2/meta --output=$(PWD)/internal/querycoordv2/meta --filename=mock_broker.go --with-expecter --structname=MockBroker --outpkg=meta
-	$(INSTALL_PATH)/mockery --name=TargetManagerInterface --dir=$(PWD)/internal/querycoordv2/meta --output=$(PWD)/internal/querycoordv2/meta --filename=mock_target_manager.go --with-expecter --structname=MockTargetManager --inpackage
-	$(INSTALL_PATH)/mockery --name=Scheduler --dir=$(PWD)/internal/querycoordv2/task --output=$(PWD)/internal/querycoordv2/task --filename=mock_scheduler.go --with-expecter --structname=MockScheduler --outpkg=task --inpackage
-	$(INSTALL_PATH)/mockery --name=Cluster --dir=$(PWD)/internal/querycoordv2/session --output=$(PWD)/internal/querycoordv2/session --filename=mock_cluster.go --with-expecter --structname=MockCluster --outpkg=session --inpackage
-	$(INSTALL_PATH)/mockery --name=Balance --dir=$(PWD)/internal/querycoordv2/balance --output=$(PWD)/internal/querycoordv2/balance --filename=mock_balancer.go --with-expecter --structname=MockBalancer --outpkg=balance --inpackage
-	$(INSTALL_PATH)/mockery --name=Controller --dir=$(PWD)/internal/querycoordv2/dist --output=$(PWD)/internal/querycoordv2/dist --filename=mock_controller.go --with-expecter --structname=MockController --outpkg=dist --inpackage
+	$(INSTALL_PATH)/mockery --config $(PWD)/internal/querycoordv2/.mockery.yaml
 
-generate-mockery-querynode: getdeps build-cpp
-	@source $(PWD)/scripts/setenv.sh # setup PKG_CONFIG_PATH
-	$(INSTALL_PATH)/mockery --name=QueryHook --dir=$(PWD)/internal/querynodev2/optimizers --output=$(PWD)/internal/querynodev2/optimizers --filename=mock_query_hook.go --with-expecter --outpkg=optimizers --structname=MockQueryHook --inpackage
-	$(INSTALL_PATH)/mockery --name=Manager --dir=$(PWD)/internal/querynodev2/cluster --output=$(PWD)/internal/querynodev2/cluster --filename=mock_manager.go --with-expecter --outpkg=cluster --structname=MockManager --inpackage
-	$(INSTALL_PATH)/mockery --name=SegmentManager --dir=$(PWD)/internal/querynodev2/segments --output=$(PWD)/internal/querynodev2/segments --filename=mock_segment_manager.go --with-expecter --outpkg=segments --structname=MockSegmentManager --inpackage
-	$(INSTALL_PATH)/mockery --name=CollectionManager --dir=$(PWD)/internal/querynodev2/segments --output=$(PWD)/internal/querynodev2/segments --filename=mock_collection_manager.go --with-expecter --outpkg=segments --structname=MockCollectionManager --inpackage
-	$(INSTALL_PATH)/mockery --name=Loader --dir=$(PWD)/internal/querynodev2/segments --output=$(PWD)/internal/querynodev2/segments --filename=mock_loader.go --with-expecter --outpkg=segments --structname=MockLoader --inpackage
-	$(INSTALL_PATH)/mockery --name=Segment --dir=$(PWD)/internal/querynodev2/segments --output=$(PWD)/internal/querynodev2/segments --filename=mock_segment.go --with-expecter --outpkg=segments --structname=MockSegment  --inpackage
-	$(INSTALL_PATH)/mockery --name=Worker --dir=$(PWD)/internal/querynodev2/cluster --output=$(PWD)/internal/querynodev2/cluster --filename=mock_worker.go --with-expecter --outpkg=worker --structname=MockWorker --inpackage
-	$(INSTALL_PATH)/mockery --name=ShardDelegator --dir=$(PWD)/internal/querynodev2/delegator/ --output=$(PWD)/internal/querynodev2/delegator/ --filename=mock_delegator.go --with-expecter --outpkg=delegator --structname=MockShardDelegator --inpackage
+generate-mockery-querynode-without-cpp:
+	@source $(PWD)/scripts/setenv.sh
+	$(INSTALL_PATH)/mockery --config $(PWD)/internal/querynodev2/.mockery.yaml
+
+generate-mockery-querynode: build-cpp generate-mockery-querynode-without-cpp
 
 generate-mockery-datacoord: getdeps
 	$(INSTALL_PATH)/mockery --name=compactionPlanContext --dir=internal/datacoord --filename=mock_compaction_plan_context.go --output=internal/datacoord  --structname=MockCompactionPlanContext --with-expecter --inpackage
@@ -498,6 +487,7 @@ generate-mockery-datacoord: getdeps
 	$(INSTALL_PATH)/mockery --name=Broker --dir=internal/datacoord/broker --filename=mock_coordinator_broker.go --output=internal/datacoord/broker  --structname=MockBroker --with-expecter --inpackage
 	$(INSTALL_PATH)/mockery --name=WorkerManager --dir=internal/datacoord/session --filename=mock_worker_manager.go --output=internal/datacoord/session  --structname=MockWorkerManager --with-expecter --inpackage
 	$(INSTALL_PATH)/mockery --name=Manager --dir=internal/datacoord --filename=mock_segment_manager.go --output=internal/datacoord  --structname=MockManager --with-expecter --inpackage
+	$(INSTALL_PATH)/mockery --name=StatsJobManager --dir=internal/datacoord --filename=mock_job_manager.go --output=internal/datacoord  --structname=MockStatsJobManager --with-expecter --inpackage
 
 generate-mockery-datanode: getdeps
 	$(INSTALL_PATH)/mockery --name=Allocator --dir=$(PWD)/internal/datanode/allocator --output=$(PWD)/internal/datanode/allocator --filename=mock_allocator.go --with-expecter --structname=MockAllocator --outpkg=allocator --inpackage
@@ -531,6 +521,9 @@ generate-mockery-utils: getdeps
 	# proxy_client_manager.go
 	$(INSTALL_PATH)/mockery --name=ProxyClientManagerInterface --dir=$(PWD)/internal/util/proxyutil --output=$(PWD)/internal/util/proxyutil --filename=mock_proxy_client_manager.go --with-expecter --structname=MockProxyClientManager --inpackage
 	$(INSTALL_PATH)/mockery --name=ProxyWatcherInterface --dir=$(PWD)/internal/util/proxyutil --output=$(PWD)/internal/util/proxyutil --filename=mock_proxy_watcher.go --with-expecter --structname=MockProxyWatcher --inpackage
+	# function
+	$(INSTALL_PATH)/mockery --name=FunctionRunner --dir=$(PWD)/internal/util/function --output=$(PWD)/internal/util/function --filename=mock_function.go --with-expecter --structname=MockFunctionRunner --inpackage
+	$(INSTALL_PATH)/mockery --name=GlobalIDAllocatorInterface --dir=internal/allocator --output=internal/allocator --filename=mock_global_id_allocator.go --with-expecter --structname=MockGlobalIDAllocator --inpackage
 
 generate-mockery-kv: getdeps
 	$(INSTALL_PATH)/mockery --name=TxnKV --dir=$(PWD)/pkg/kv --output=$(PWD)/internal/kv/mocks --filename=txn_kv.go --with-expecter

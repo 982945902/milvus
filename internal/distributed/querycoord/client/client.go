@@ -25,6 +25,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus/internal/distributed/utils"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/types"
@@ -63,6 +64,16 @@ func NewClient(ctx context.Context) (types.QueryCoordClient, error) {
 	client.grpcClient.SetNewGrpcClientFunc(client.newGrpcClient)
 	client.grpcClient.SetSession(sess)
 
+	if Params.InternalTLSCfg.InternalTLSEnabled.GetAsBool() {
+		client.grpcClient.EnableEncryption()
+		cp, err := utils.CreateCertPoolforClient(Params.InternalTLSCfg.InternalTLSCaPemPath.GetValue(), "QueryCoord")
+		if err != nil {
+			log.Error("Failed to create cert pool for QueryCoord client")
+			return nil, err
+		}
+		client.grpcClient.SetInternalTLSCertPool(cp)
+		client.grpcClient.SetInternalTLSServerName(Params.InternalTLSCfg.InternalTLSSNI.GetValue())
+	}
 	return client, nil
 }
 
@@ -510,5 +521,16 @@ func (c *Client) CheckQueryNodeDistribution(ctx context.Context, req *querypb.Ch
 	)
 	return wrapGrpcCall(ctx, c, func(client querypb.QueryCoordClient) (*commonpb.Status, error) {
 		return client.CheckQueryNodeDistribution(ctx, req)
+	})
+}
+
+func (c *Client) UpdateLoadConfig(ctx context.Context, req *querypb.UpdateLoadConfigRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	req = typeutil.Clone(req)
+	commonpbutil.UpdateMsgBase(
+		req.GetBase(),
+		commonpbutil.FillMsgBaseFromClient(paramtable.GetNodeID(), commonpbutil.WithTargetID(c.grpcClient.GetNodeID())),
+	)
+	return wrapGrpcCall(ctx, c, func(client querypb.QueryCoordClient) (*commonpb.Status, error) {
+		return client.UpdateLoadConfig(ctx, req)
 	})
 }

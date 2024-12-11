@@ -178,7 +178,7 @@ func (it *insertTask) PreExecute(ctx context.Context) error {
 	}
 
 	// set field ID to insert field data
-	err = fillFieldIDBySchema(it.insertMsg.GetFieldsData(), schema.CollectionSchema)
+	err = fillFieldPropertiesBySchema(it.insertMsg.GetFieldsData(), schema.CollectionSchema)
 	if err != nil {
 		log.Info("set fieldID to fieldData failed",
 			zap.Error(err))
@@ -202,7 +202,12 @@ func (it *insertTask) PreExecute(ctx context.Context) error {
 		// insert to _default partition
 		partitionTag := it.insertMsg.GetPartitionName()
 		if len(partitionTag) <= 0 {
-			partitionTag = Params.CommonCfg.DefaultPartitionName.GetValue()
+			pinfo, err := globalMetaCache.GetPartitionInfo(ctx, it.insertMsg.GetDbName(), collectionName, "")
+			if err != nil {
+				log.Warn("get partition info failed", zap.String("collectionName", collectionName), zap.Error(err))
+				return err
+			}
+			partitionTag = pinfo.name
 			it.insertMsg.PartitionName = partitionTag
 		}
 
@@ -238,7 +243,7 @@ func (it *insertTask) Execute(ctx context.Context) error {
 	it.insertMsg.CollectionID = collID
 
 	getCacheDur := tr.RecordSpan()
-	stream, err := it.chMgr.getOrCreateDmlStream(collID)
+	stream, err := it.chMgr.getOrCreateDmlStream(ctx, collID)
 	if err != nil {
 		return err
 	}
@@ -275,7 +280,7 @@ func (it *insertTask) Execute(ctx context.Context) error {
 
 	log.Debug("assign segmentID for insert data success",
 		zap.Duration("assign segmentID duration", assignSegmentIDDur))
-	err = stream.Produce(msgPack)
+	err = stream.Produce(ctx, msgPack)
 	if err != nil {
 		log.Warn("fail to produce insert msg", zap.Error(err))
 		it.result.Status = merr.Status(err)

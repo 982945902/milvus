@@ -138,6 +138,7 @@ message AlterIndexRequest {
     int64 collectionID = 1;
     string index_name = 2;
     repeated common.KeyValuePair params = 3;
+    repeated string delete_keys = 4;
 }
 
 message GetIndexInfoRequest {
@@ -218,6 +219,7 @@ message StorageConfig {
     string cloud_provider = 12;
     int64 request_timeout_ms = 13;
     string sslCACert = 14;
+    string GcpCredentialJSON = 15;
 }
 
 // Synchronously modify OptionalFieldInfo in index_cgo_msg.proto file
@@ -311,4 +313,13 @@ message StatsTask {
     JobState state = 8;
     string fail_reason = 9;
     int64 target_segmentID = 10;
+    index.StatsSubJob subJobType = 11;
+    bool canRecycle = 12;
+}
+
+enum StatsSubJob {
+    None = 0;
+    Sort = 1;
+    TextIndexJob = 2;
+    BM25Job=3;
 }

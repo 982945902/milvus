@@ -27,7 +27,7 @@ namespace milvus {
 struct SearchInfo {
     int64_t topk_{0};
     int64_t group_size_{1};
-    bool group_strict_size_{false};
+    bool strict_group_size_{false};
     int64_t round_decimal_{0};
     FieldId field_id_;
     MetricType metric_type_;
@@ -35,6 +35,7 @@ struct SearchInfo {
     std::optional<FieldId> group_by_field_id_;
     tracer::TraceContext trace_ctx_;
     bool materialized_view_involved = false;
+    bool iterative_filter_execution = false;
 };
 
 using SearchInfoPtr = std::shared_ptr<SearchInfo>;

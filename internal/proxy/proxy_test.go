@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
@@ -53,6 +52,7 @@ import (
 	grpcquerynode "github.com/milvus-io/milvus/internal/distributed/querynode"
 	grpcrootcoord "github.com/milvus-io/milvus/internal/distributed/rootcoord"
 	rcc "github.com/milvus-io/milvus/internal/distributed/rootcoord/client"
+	"github.com/milvus-io/milvus/internal/json"
 	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/proxypb"
@@ -96,13 +96,16 @@ func runRootCoord(ctx context.Context, localMsg bool) *grpcrootcoord.Server {
 
 	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		factory := dependency.NewDefaultFactory(localMsg)
 		var err error
 		rc, err = grpcrootcoord.NewServer(ctx, factory)
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
+		if err = rc.Prepare(); err != nil {
+			panic(err)
+		}
 		err = rc.Run()
 		if err != nil {
 			panic(err)
@@ -120,13 +123,16 @@ func runQueryCoord(ctx context.Context, localMsg bool) *grpcquerycoord.Server {
 
 	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		factory := dependency.NewDefaultFactory(localMsg)
 		var err error
 		qs, err = grpcquerycoord.NewServer(ctx, factory)
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
+		if err = qs.Prepare(); err != nil {
+			panic(err)
+		}
 		err = qs.Run()
 		if err != nil {
 			panic(err)
@@ -144,13 +150,16 @@ func runQueryNode(ctx context.Context, localMsg bool, alias string) *grpcqueryno
 
 	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		factory := dependency.MockDefaultFactory(localMsg, Params)
 		var err error
 		qn, err = grpcquerynode.NewServer(ctx, factory)
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
+		if err = qn.Prepare(); err != nil {
+			panic(err)
+		}
 		err = qn.Run()
 		if err != nil {
 			panic(err)
@@ -168,10 +177,17 @@ func runDataCoord(ctx context.Context, localMsg bool) *grpcdatacoordclient.Serve
 
 	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		factory := dependency.NewDefaultFactory(localMsg)
-		ds = grpcdatacoordclient.NewServer(ctx, factory)
-		wg.Done()
-		err := ds.Run()
+		var err error
+		ds, err = grpcdatacoordclient.NewServer(ctx, factory)
+		if err != nil {
+			panic(err)
+		}
+		if err = ds.Prepare(); err != nil {
+			panic(err)
+		}
+		err = ds.Run()
 		if err != nil {
 			panic(err)
 		}
@@ -188,13 +204,16 @@ func runDataNode(ctx context.Context, localMsg bool, alias string) *grpcdatanode
 
 	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		factory := dependency.MockDefaultFactory(localMsg, Params)
 		var err error
 		dn, err = grpcdatanode.NewServer(ctx, factory)
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
+		if err = dn.Prepare(); err != nil {
+			panic(err)
+		}
 		err = dn.Run()
 		if err != nil {
 			panic(err)
@@ -212,13 +231,13 @@ func runIndexNode(ctx context.Context, localMsg bool, alias string) *grpcindexno
 
 	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		factory := dependency.MockDefaultFactory(localMsg, Params)
 		var err error
 		in, err = grpcindexnode.NewServer(ctx, factory)
 		if err != nil {
 			panic(err)
 		}
-		wg.Done()
 		etcd, err := etcd.GetEtcdClient(
 			Params.EtcdCfg.UseEmbedEtcd.GetAsBool(),
 			Params.EtcdCfg.EtcdUseSSL.GetAsBool(),
@@ -231,6 +250,9 @@ func runIndexNode(ctx context.Context, localMsg bool, alias string) *grpcindexno
 			panic(err)
 		}
 		in.SetEtcdClient(etcd)
+		if err = in.Prepare(); err != nil {
+			panic(err)
+		}
 		err = in.Run()
 		if err != nil {
 			panic(err)
@@ -343,6 +365,15 @@ func TestProxy(t *testing.T) {
 	var err error
 	var wg sync.WaitGroup
 	paramtable.Init()
+	params := paramtable.Get()
+	params.RootCoordGrpcServerCfg.IP = "localhost"
+	params.QueryCoordGrpcServerCfg.IP = "localhost"
+	params.DataCoordGrpcServerCfg.IP = "localhost"
+	params.ProxyGrpcServerCfg.IP = "localhost"
+	params.QueryNodeGrpcServerCfg.IP = "localhost"
+	params.DataNodeGrpcServerCfg.IP = "localhost"
+	params.IndexNodeGrpcServerCfg.IP = "localhost"
+	params.StreamingNodeGrpcServerCfg.IP = "localhost"
 
 	path := "/tmp/milvus/rocksmq" + funcutil.GenRandomStr()
 	t.Setenv("ROCKSMQ_PATH", path)
@@ -2678,6 +2709,8 @@ func TestProxy(t *testing.T) {
 
 	testProxyRole(ctx, t, proxy)
 	testProxyPrivilege(ctx, t, proxy)
+	testProxyOperatePrivilegeV2(ctx, t, proxy)
+	assert.False(t, false, true)
 	testProxyRefreshPolicyInfoCache(ctx, t, proxy)
 
 	// proxy unhealthy
@@ -4340,6 +4373,106 @@ func testProxyPrivilege(ctx context.Context, t *testing.T, proxy *Proxy) {
 
 		roleReq.Type = milvuspb.OperatePrivilegeType_Revoke
 		resp, _ = proxy.OperatePrivilege(ctx, roleReq)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+	})
+
+	wg.Wait()
+}
+
+func testProxyOperatePrivilegeV2(ctx context.Context, t *testing.T, proxy *Proxy) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	t.Run("Operate Privilege V2, Select Grant", func(t *testing.T) {
+		defer wg.Done()
+
+		// GrantPrivilege
+		req := &milvuspb.OperatePrivilegeV2Request{}
+		resp, _ := proxy.OperatePrivilegeV2(ctx, req)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		req.Role = &milvuspb.RoleEntity{}
+		resp, _ = proxy.OperatePrivilegeV2(ctx, req)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		req.Grantor = &milvuspb.GrantorEntity{}
+		resp, _ = proxy.OperatePrivilegeV2(ctx, req)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		req.Grantor.Privilege = &milvuspb.PrivilegeEntity{}
+		resp, _ = proxy.OperatePrivilegeV2(ctx, req)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		req.Grantor.Privilege.Name = util.MetaStore2API(commonpb.ObjectPrivilege_PrivilegeAll.String())
+
+		resp, _ = proxy.OperatePrivilegeV2(ctx, req)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		req.DbName = ""
+		resp, _ = proxy.OperatePrivilegeV2(ctx, req)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		req.CollectionName = ""
+		resp, _ = proxy.OperatePrivilegeV2(ctx, req)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		roleReq := &milvuspb.OperatePrivilegeV2Request{
+			Role:           &milvuspb.RoleEntity{Name: "public"},
+			Grantor:        &milvuspb.GrantorEntity{Privilege: &milvuspb.PrivilegeEntity{Name: util.MetaStore2API(commonpb.ObjectPrivilege_PrivilegeLoad.String())}},
+			DbName:         "default",
+			CollectionName: "col1",
+			Type:           milvuspb.OperatePrivilegeType_Grant,
+		}
+		resp, _ = proxy.OperatePrivilegeV2(ctx, roleReq)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		roleReq = &milvuspb.OperatePrivilegeV2Request{
+			Role:           &milvuspb.RoleEntity{Name: "public"},
+			Grantor:        &milvuspb.GrantorEntity{Privilege: &milvuspb.PrivilegeEntity{Name: util.MetaStore2API(commonpb.ObjectPrivilege_PrivilegeGroupClusterReadOnly.String())}},
+			DbName:         util.AnyWord,
+			CollectionName: util.AnyWord,
+			Type:           milvuspb.OperatePrivilegeType_Grant,
+		}
+		resp, _ = proxy.OperatePrivilegeV2(ctx, roleReq)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		roleReq = &milvuspb.OperatePrivilegeV2Request{
+			Role:           &milvuspb.RoleEntity{Name: "public"},
+			Grantor:        &milvuspb.GrantorEntity{Privilege: &milvuspb.PrivilegeEntity{Name: util.MetaStore2API(commonpb.ObjectPrivilege_PrivilegeGroupClusterReadOnly.String())}},
+			DbName:         "db1",
+			CollectionName: util.AnyWord,
+			Type:           milvuspb.OperatePrivilegeType_Grant,
+		}
+		resp, _ = proxy.OperatePrivilegeV2(ctx, roleReq)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		roleReq = &milvuspb.OperatePrivilegeV2Request{
+			Role:           &milvuspb.RoleEntity{Name: "public"},
+			Grantor:        &milvuspb.GrantorEntity{Privilege: &milvuspb.PrivilegeEntity{Name: util.MetaStore2API(commonpb.ObjectPrivilege_PrivilegeGroupCollectionReadOnly.String())}},
+			DbName:         "db1",
+			CollectionName: util.AnyWord,
+			Type:           milvuspb.OperatePrivilegeType_Grant,
+		}
+		resp, _ = proxy.OperatePrivilegeV2(ctx, roleReq)
+		assert.Equal(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		roleReq = &milvuspb.OperatePrivilegeV2Request{
+			Role:           &milvuspb.RoleEntity{Name: "public"},
+			Grantor:        &milvuspb.GrantorEntity{Privilege: &milvuspb.PrivilegeEntity{Name: util.MetaStore2API(commonpb.ObjectPrivilege_PrivilegeGroupClusterReadOnly.String())}},
+			DbName:         "db1",
+			CollectionName: "col1",
+			Type:           milvuspb.OperatePrivilegeType_Grant,
+		}
+		resp, _ = proxy.OperatePrivilegeV2(ctx, roleReq)
+		assert.NotEqual(t, commonpb.ErrorCode_Success, resp.ErrorCode)
+
+		roleReq = &milvuspb.OperatePrivilegeV2Request{
+			Role:           &milvuspb.RoleEntity{Name: "public"},
+			Grantor:        &milvuspb.GrantorEntity{Privilege: &milvuspb.PrivilegeEntity{Name: util.MetaStore2API(commonpb.ObjectPrivilege_PrivilegeGroupDatabaseReadOnly.String())}},
+			DbName:         "db1",
+			CollectionName: util.AnyWord,
+			Type:           milvuspb.OperatePrivilegeType_Grant,
+		}
+		resp, _ = proxy.OperatePrivilegeV2(ctx, roleReq)
 		assert.Equal(t, commonpb.ErrorCode_Success, resp.ErrorCode)
 	})
 

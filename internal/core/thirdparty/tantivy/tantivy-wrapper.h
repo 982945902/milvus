@@ -8,9 +8,15 @@
 #include "tantivy-binding.h"
 #include "rust-binding.h"
 #include "rust-array.h"
+#include "rust-hashmap.h"
 
 namespace milvus::tantivy {
-static constexpr uintptr_t DEFAULT_NUM_THREADS = 4;
+using Map = std::map<std::string, std::string>;
+
+static constexpr const char* DEFAULT_TOKENIZER_NAME = "milvus_tokenizer";
+static const char* DEFAULT_analyzer_params = "{}";
+static constexpr uintptr_t DEFAULT_NUM_THREADS =
+    1;  // Every field with index writer will generate a thread, make huge thread amount, wait for refactoring.
 static constexpr uintptr_t DEFAULT_OVERALL_MEMORY_BUDGET_IN_BYTES =
     DEFAULT_NUM_THREADS * 15 * 1024 * 1024;
 
@@ -69,6 +75,7 @@ struct TantivyIndexWrapper {
         return *this;
     }
 
+    // create index writer for non-text type.
     TantivyIndexWrapper(const char* field_name,
                         TantivyDataType data_type,
                         const char* path,
@@ -90,8 +97,47 @@ struct TantivyIndexWrapper {
         path_ = std::string(path);
     }
 
+    // create index writer for text type with tokenizer.
+    TantivyIndexWrapper(const char* field_name,
+                        bool in_ram,
+                        const char* path,
+                        const char* tokenizer_name = DEFAULT_TOKENIZER_NAME,
+                        const char* analyzer_params = DEFAULT_analyzer_params,
+                        uintptr_t num_threads = DEFAULT_NUM_THREADS,
+                        uintptr_t overall_memory_budget_in_bytes =
+                            DEFAULT_OVERALL_MEMORY_BUDGET_IN_BYTES) {
+        writer_ = tantivy_create_text_writer(field_name,
+                                             path,
+                                             tokenizer_name,
+                                             analyzer_params,
+                                             num_threads,
+                                             overall_memory_budget_in_bytes,
+                                             in_ram);
+        path_ = std::string(path);
+    }
+
+    // create reader.
+    void
+    create_reader() {
+        if (writer_ != nullptr) {
+            reader_ = tantivy_create_reader_from_writer(writer_);
+        } else if (!path_.empty()) {
+            assert(tantivy_index_exist(path_.c_str()));
+            reader_ = tantivy_load_index(path_.c_str());
+        }
+    }
+
     ~TantivyIndexWrapper() {
         free();
+    }
+
+    void
+    register_tokenizer(const char* tokenizer_name,
+                       const char* analyzer_params) {
+        if (reader_ != nullptr) {
+            tantivy_register_tokenizer(
+                reader_, tokenizer_name, analyzer_params);
+        }
     }
 
     template <typename T>
@@ -212,8 +258,21 @@ struct TantivyIndexWrapper {
 
         tantivy_finish_index(writer_);
         writer_ = nullptr;
-        reader_ = tantivy_load_index(path_.c_str());
         finished_ = true;
+    }
+
+    inline void
+    commit() {
+        if (writer_ != nullptr) {
+            tantivy_commit_index(writer_);
+        }
+    }
+
+    inline void
+    reload() {
+        if (reader_ != nullptr) {
+            tantivy_reload_index(reader_);
+        }
     }
 
     inline uint32_t
@@ -359,6 +418,12 @@ struct TantivyIndexWrapper {
     RustArrayWrapper
     regex_query(const std::string& pattern) {
         auto array = tantivy_regex_query(reader_, pattern.c_str());
+        return RustArrayWrapper(array);
+    }
+
+    RustArrayWrapper
+    match_query(const std::string& query) {
+        auto array = tantivy_match_query(reader_, query.c_str());
         return RustArrayWrapper(array);
     }
 

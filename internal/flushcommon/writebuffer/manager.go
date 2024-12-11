@@ -16,6 +16,7 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/lifetime"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
+	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
 // BufferManager is the interface for WriteBuffer management.
@@ -24,6 +25,8 @@ import (
 type BufferManager interface {
 	// Register adds a WriteBuffer with provided schema & options.
 	Register(channel string, metacache metacache.MetaCache, opts ...WriteBufferOption) error
+	// CreateNewGrowingSegment notifies writeBuffer to create a new growing segment.
+	CreateNewGrowingSegment(ctx context.Context, channel string, partition int64, segmentID int64) error
 	// SealSegments notifies writeBuffer corresponding to provided channel to seal segments.
 	// which will cause segment start flush procedure.
 	SealSegments(ctx context.Context, channel string, segmentIDs []int64) error
@@ -35,7 +38,7 @@ type BufferManager interface {
 	DropChannel(channel string)
 	DropPartitions(channel string, partitionIDs []int64)
 	// BufferData put data into channel write buffer.
-	BufferData(channel string, insertMsgs []*msgstream.InsertMsg, deleteMsgs []*msgstream.DeleteMsg, startPos, endPos *msgpb.MsgPosition) error
+	BufferData(channel string, insertData []*InsertData, deleteMsgs []*msgstream.DeleteMsg, startPos, endPos *msgpb.MsgPosition) error
 	// GetCheckpoint returns checkpoint for provided channel.
 	GetCheckpoint(channel string) (*msgpb.MsgPosition, bool, error)
 	// NotifyCheckpointUpdated notify write buffer checkpoint updated to reset flushTs.
@@ -51,7 +54,7 @@ type BufferManager interface {
 func NewManager(syncMgr syncmgr.SyncManager) BufferManager {
 	return &bufferManager{
 		syncMgr: syncMgr,
-		buffers: make(map[string]WriteBuffer),
+		buffers: typeutil.NewConcurrentMap[string, WriteBuffer](),
 
 		ch: lifetime.NewSafeChan(),
 	}
@@ -59,8 +62,7 @@ func NewManager(syncMgr syncmgr.SyncManager) BufferManager {
 
 type bufferManager struct {
 	syncMgr syncmgr.SyncManager
-	buffers map[string]WriteBuffer
-	mut     sync.RWMutex
+	buffers *typeutil.ConcurrentMap[string, WriteBuffer]
 
 	wg sync.WaitGroup
 	ch lifetime.SafeChan
@@ -75,13 +77,19 @@ func (m *bufferManager) Start() {
 }
 
 func (m *bufferManager) check() {
-	ticker := time.NewTimer(paramtable.Get().DataNodeCfg.MemoryCheckInterval.GetAsDuration(time.Millisecond))
-	defer ticker.Stop()
+	timer := time.NewTimer(paramtable.Get().DataNodeCfg.MemoryCheckInterval.GetAsDuration(time.Millisecond))
+	defer timer.Stop()
 	for {
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			m.memoryCheck()
-			ticker.Reset(paramtable.Get().DataNodeCfg.MemoryCheckInterval.GetAsDuration(time.Millisecond))
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(paramtable.Get().DataNodeCfg.MemoryCheckInterval.GetAsDuration(time.Millisecond))
 		case <-m.ch.CloseCh():
 			log.Info("buffer manager memory check stopped")
 			return
@@ -94,9 +102,14 @@ func (m *bufferManager) memoryCheck() {
 	if !paramtable.Get().DataNodeCfg.MemoryForceSyncEnable.GetAsBool() {
 		return
 	}
+	startTime := time.Now()
+	defer func() {
+		dur := time.Since(startTime)
+		if dur > 30*time.Second {
+			log.Warn("memory check takes too long", zap.Duration("time", dur))
+		}
+	}()
 
-	m.mut.Lock()
-	defer m.mut.Unlock()
 	for {
 		var total int64
 		var candidate WriteBuffer
@@ -107,7 +120,14 @@ func (m *bufferManager) memoryCheck() {
 			return mem / 1024 / 1024
 		}
 
-		for chanName, buf := range m.buffers {
+		select {
+		case <-m.ch.CloseCh():
+			log.Info("stop memory check due to manager stop")
+			return
+		default:
+		}
+
+		m.buffers.Range(func(chanName string, buf WriteBuffer) bool {
 			size := buf.MemorySize()
 			total += size
 			if size > candiSize {
@@ -115,7 +135,8 @@ func (m *bufferManager) memoryCheck() {
 				candidate = buf
 				candiChan = chanName
 			}
-		}
+			return true
+		})
 
 		totalMemory := hardware.GetMemoryCount()
 		memoryWatermark := float64(totalMemory) * paramtable.Get().DataNodeCfg.MemoryForceSyncWatermark.GetAsFloat()
@@ -141,28 +162,37 @@ func (m *bufferManager) Stop() {
 
 // Register a new WriteBuffer for channel.
 func (m *bufferManager) Register(channel string, metacache metacache.MetaCache, opts ...WriteBufferOption) error {
-	m.mut.Lock()
-	defer m.mut.Unlock()
-
-	_, ok := m.buffers[channel]
-	if ok {
-		return merr.WrapErrChannelReduplicate(channel)
-	}
 	buf, err := NewWriteBuffer(channel, metacache, m.syncMgr, opts...)
 	if err != nil {
 		return err
 	}
-	m.buffers[channel] = buf
+
+	_, loaded := m.buffers.GetOrInsert(channel, buf)
+	if loaded {
+		buf.Close(context.Background(), false)
+		return merr.WrapErrChannelReduplicate(channel)
+	}
+	return nil
+}
+
+// CreateNewGrowingSegment notifies writeBuffer to create a new growing segment.
+func (m *bufferManager) CreateNewGrowingSegment(ctx context.Context, channel string, partitionID int64, segmentID int64) error {
+	buf, loaded := m.buffers.Get(channel)
+	if !loaded {
+		log.Ctx(ctx).Warn("write buffer not found when create new growing segment",
+			zap.String("channel", channel),
+			zap.Int64("partitionID", partitionID),
+			zap.Int64("segmentID", segmentID))
+		return merr.WrapErrChannelNotFound(channel)
+	}
+	buf.CreateNewGrowingSegment(partitionID, segmentID, nil)
 	return nil
 }
 
 // SealSegments call sync segment and change segments state to Flushed.
 func (m *bufferManager) SealSegments(ctx context.Context, channel string, segmentIDs []int64) error {
-	m.mut.RLock()
-	buf, ok := m.buffers[channel]
-	m.mut.RUnlock()
-
-	if !ok {
+	buf, loaded := m.buffers.Get(channel)
+	if !loaded {
 		log.Ctx(ctx).Warn("write buffer not found when flush segments",
 			zap.String("channel", channel),
 			zap.Int64s("segmentIDs", segmentIDs))
@@ -173,12 +203,9 @@ func (m *bufferManager) SealSegments(ctx context.Context, channel string, segmen
 }
 
 func (m *bufferManager) FlushChannel(ctx context.Context, channel string, flushTs uint64) error {
-	m.mut.RLock()
-	buf, ok := m.buffers[channel]
-	m.mut.RUnlock()
-
-	if !ok {
-		log.Ctx(ctx).Warn("write buffer not found when flush segments",
+	buf, loaded := m.buffers.Get(channel)
+	if !loaded {
+		log.Ctx(ctx).Warn("write buffer not found when flush channel",
 			zap.String("channel", channel),
 			zap.Uint64("flushTs", flushTs))
 		return merr.WrapErrChannelNotFound(channel)
@@ -188,27 +215,21 @@ func (m *bufferManager) FlushChannel(ctx context.Context, channel string, flushT
 }
 
 // BufferData put data into channel write buffer.
-func (m *bufferManager) BufferData(channel string, insertMsgs []*msgstream.InsertMsg, deleteMsgs []*msgstream.DeleteMsg, startPos, endPos *msgpb.MsgPosition) error {
-	m.mut.RLock()
-	buf, ok := m.buffers[channel]
-	m.mut.RUnlock()
-
-	if !ok {
+func (m *bufferManager) BufferData(channel string, insertData []*InsertData, deleteMsgs []*msgstream.DeleteMsg, startPos, endPos *msgpb.MsgPosition) error {
+	buf, loaded := m.buffers.Get(channel)
+	if !loaded {
 		log.Ctx(context.Background()).Warn("write buffer not found when buffer data",
 			zap.String("channel", channel))
 		return merr.WrapErrChannelNotFound(channel)
 	}
 
-	return buf.BufferData(insertMsgs, deleteMsgs, startPos, endPos)
+	return buf.BufferData(insertData, deleteMsgs, startPos, endPos)
 }
 
 // GetCheckpoint returns checkpoint for provided channel.
 func (m *bufferManager) GetCheckpoint(channel string) (*msgpb.MsgPosition, bool, error) {
-	m.mut.RLock()
-	buf, ok := m.buffers[channel]
-	m.mut.RUnlock()
-
-	if !ok {
+	buf, loaded := m.buffers.Get(channel)
+	if !loaded {
 		return nil, false, merr.WrapErrChannelNotFound(channel)
 	}
 	cp := buf.GetCheckpoint()
@@ -218,10 +239,8 @@ func (m *bufferManager) GetCheckpoint(channel string) (*msgpb.MsgPosition, bool,
 }
 
 func (m *bufferManager) NotifyCheckpointUpdated(channel string, ts uint64) {
-	m.mut.Lock()
-	defer m.mut.Unlock()
-	buf, ok := m.buffers[channel]
-	if !ok {
+	buf, loaded := m.buffers.Get(channel)
+	if !loaded {
 		return
 	}
 	flushTs := buf.GetFlushTimestamp()
@@ -234,12 +253,8 @@ func (m *bufferManager) NotifyCheckpointUpdated(channel string, ts uint64) {
 // RemoveChannel remove channel WriteBuffer from manager.
 // this method discards all buffered data since datanode no longer has the ownership
 func (m *bufferManager) RemoveChannel(channel string) {
-	m.mut.Lock()
-	buf, ok := m.buffers[channel]
-	delete(m.buffers, channel)
-	m.mut.Unlock()
-
-	if !ok {
+	buf, loaded := m.buffers.GetAndRemove(channel)
+	if !loaded {
 		log.Warn("failed to remove channel, channel not maintained in manager", zap.String("channel", channel))
 		return
 	}
@@ -250,12 +265,8 @@ func (m *bufferManager) RemoveChannel(channel string) {
 // DropChannel removes channel WriteBuffer and process `DropChannel`
 // this method will save all buffered data
 func (m *bufferManager) DropChannel(channel string) {
-	m.mut.Lock()
-	buf, ok := m.buffers[channel]
-	delete(m.buffers, channel)
-	m.mut.Unlock()
-
-	if !ok {
+	buf, loaded := m.buffers.GetAndRemove(channel)
+	if !loaded {
 		log.Warn("failed to drop channel, channel not maintained in manager", zap.String("channel", channel))
 		return
 	}
@@ -264,11 +275,8 @@ func (m *bufferManager) DropChannel(channel string) {
 }
 
 func (m *bufferManager) DropPartitions(channel string, partitionIDs []int64) {
-	m.mut.RLock()
-	buf, ok := m.buffers[channel]
-	m.mut.RUnlock()
-
-	if !ok {
+	buf, loaded := m.buffers.Get(channel)
+	if !loaded {
 		log.Warn("failed to drop partition, channel not maintained in manager", zap.String("channel", channel), zap.Int64s("partitionIDs", partitionIDs))
 		return
 	}

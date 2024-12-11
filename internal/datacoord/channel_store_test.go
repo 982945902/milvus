@@ -1,6 +1,7 @@
 package datacoord
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"testing"
@@ -37,7 +38,8 @@ func (s *StateChannelStoreSuite) SetupTest() {
 func generateWatchInfo(name string, state datapb.ChannelWatchState) *datapb.ChannelWatchInfo {
 	return &datapb.ChannelWatchInfo{
 		Vchan: &datapb.VchannelInfo{
-			ChannelName: name,
+			CollectionID: 1,
+			ChannelName:  name,
 		},
 		Schema: &schemapb.CollectionSchema{},
 		State:  state,
@@ -241,8 +243,8 @@ func (s *StateChannelStoreSuite) TestUpdateWithTxnLimit() {
 	for _, test := range tests {
 		s.SetupTest()
 		s.Run(test.description, func() {
-			s.mockTxn.EXPECT().MultiSaveAndRemove(mock.Anything, mock.Anything).
-				Run(func(saves map[string]string, removals []string, preds ...predicates.Predicate) {
+			s.mockTxn.EXPECT().MultiSaveAndRemove(mock.Anything, mock.Anything, mock.Anything).
+				Run(func(ctx context.Context, saves map[string]string, removals []string, preds ...predicates.Predicate) {
 					log.Info("test save and remove", zap.Any("saves", saves), zap.Any("removals", removals))
 				}).Return(nil).Times(test.outTxnCount)
 
@@ -275,8 +277,8 @@ func (s *StateChannelStoreSuite) TestUpdateMeta2000kSegs() {
 		NewChannelOp(100, Watch, ch),
 	)
 	s.SetupTest()
-	s.mockTxn.EXPECT().MultiSaveAndRemove(mock.Anything, mock.Anything).
-		Run(func(saves map[string]string, removals []string, preds ...predicates.Predicate) {
+	s.mockTxn.EXPECT().MultiSaveAndRemove(mock.Anything, mock.Anything, mock.Anything).
+		Run(func(ctx context.Context, saves map[string]string, removals []string, preds ...predicates.Predicate) {
 		}).Return(nil).Once()
 
 	store := NewStateChannelStore(s.mockTxn)
@@ -380,8 +382,8 @@ func (s *StateChannelStoreSuite) TestUpdateMeta() {
 		},
 	}
 	s.SetupTest()
-	s.mockTxn.EXPECT().MultiSaveAndRemove(mock.Anything, mock.Anything).
-		Run(func(saves map[string]string, removals []string, preds ...predicates.Predicate) {
+	s.mockTxn.EXPECT().MultiSaveAndRemove(mock.Anything, mock.Anything, mock.Anything).
+		Run(func(ctx context.Context, saves map[string]string, removals []string, preds ...predicates.Predicate) {
 		}).Return(nil).Times(len(tests))
 
 	for _, test := range tests {
@@ -494,7 +496,7 @@ func (s *StateChannelStoreSuite) TestReload() {
 				s.Require().NoError(err)
 				values = append(values, string(bs))
 			}
-			s.mockTxn.EXPECT().LoadWithPrefix(mock.AnythingOfType("string")).Return(keys, values, nil)
+			s.mockTxn.EXPECT().LoadWithPrefix(mock.Anything, mock.AnythingOfType("string")).Return(keys, values, nil)
 
 			store := NewStateChannelStore(s.mockTxn)
 			err := store.Reload()

@@ -39,7 +39,6 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/workerpb"
 	"github.com/milvus-io/milvus/pkg/common"
-	"github.com/milvus-io/milvus/pkg/util/indexparamcheck"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 )
@@ -57,6 +56,194 @@ var (
 )
 
 func createIndexMeta(catalog metastore.DataCoordCatalog) *indexMeta {
+	indexBuildInfo := newSegmentIndexBuildInfo()
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        1025,
+		IndexID:        indexID,
+		BuildID:        buildID,
+		NodeID:         0,
+		IndexVersion:   0,
+		IndexState:     commonpb.IndexState_Unissued,
+		FailReason:     "",
+		IsDeleted:      false,
+		CreatedUTCTime: 0,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID + 1,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        1026,
+		IndexID:        indexID,
+		BuildID:        buildID + 1,
+		NodeID:         nodeID,
+		IndexVersion:   1,
+		IndexState:     commonpb.IndexState_InProgress,
+		FailReason:     "",
+		IsDeleted:      false,
+		CreatedUTCTime: 1111,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID + 2,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        1026,
+		IndexID:        indexID,
+		BuildID:        buildID + 2,
+		NodeID:         nodeID,
+		IndexVersion:   1,
+		IndexState:     commonpb.IndexState_InProgress,
+		FailReason:     "",
+		IsDeleted:      true,
+		CreatedUTCTime: 1111,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID + 3,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        500,
+		IndexID:        indexID,
+		BuildID:        buildID + 3,
+		NodeID:         0,
+		IndexVersion:   0,
+		IndexState:     commonpb.IndexState_Unissued,
+		FailReason:     "",
+		IsDeleted:      false,
+		CreatedUTCTime: 1111,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID + 4,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        1026,
+		IndexID:        indexID,
+		BuildID:        buildID + 4,
+		NodeID:         nodeID,
+		IndexVersion:   1,
+		IndexState:     commonpb.IndexState_Finished,
+		FailReason:     "",
+		IsDeleted:      false,
+		CreatedUTCTime: 1111,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID + 5,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        1026,
+		IndexID:        indexID,
+		BuildID:        buildID + 5,
+		NodeID:         0,
+		IndexVersion:   1,
+		IndexState:     commonpb.IndexState_Finished,
+		FailReason:     "",
+		IsDeleted:      false,
+		CreatedUTCTime: 1111,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID + 6,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        1026,
+		IndexID:        indexID,
+		BuildID:        buildID + 6,
+		NodeID:         0,
+		IndexVersion:   1,
+		IndexState:     commonpb.IndexState_Finished,
+		FailReason:     "",
+		IsDeleted:      false,
+		CreatedUTCTime: 1111,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID + 7,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        1026,
+		IndexID:        indexID,
+		BuildID:        buildID + 7,
+		NodeID:         0,
+		IndexVersion:   1,
+		IndexState:     commonpb.IndexState_Failed,
+		FailReason:     "error",
+		IsDeleted:      false,
+		CreatedUTCTime: 1111,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID + 8,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        1026,
+		IndexID:        indexID,
+		BuildID:        buildID + 8,
+		NodeID:         nodeID + 1,
+		IndexVersion:   1,
+		IndexState:     commonpb.IndexState_InProgress,
+		FailReason:     "",
+		IsDeleted:      false,
+		CreatedUTCTime: 1111,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID + 9,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        500,
+		IndexID:        indexID,
+		BuildID:        buildID + 9,
+		NodeID:         0,
+		IndexVersion:   0,
+		IndexState:     commonpb.IndexState_Unissued,
+		FailReason:     "",
+		IsDeleted:      false,
+		CreatedUTCTime: 1111,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
+	indexBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID + 10,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        500,
+		IndexID:        indexID,
+		BuildID:        buildID + 10,
+		NodeID:         nodeID,
+		IndexVersion:   0,
+		IndexState:     commonpb.IndexState_Unissued,
+		FailReason:     "",
+		IsDeleted:      false,
+		CreatedUTCTime: 1111,
+		IndexFileKeys:  nil,
+		IndexSize:      1,
+	})
+
 	return &indexMeta{
 		catalog: catalog,
 		indexes: map[UniqueID]map[UniqueID]*model.Index{
@@ -91,381 +278,204 @@ func createIndexMeta(catalog metastore.DataCoordCatalog) *indexMeta {
 		segmentIndexes: map[UniqueID]map[UniqueID]*model.SegmentIndex{
 			segID: {
 				indexID: {
-					SegmentID:     segID,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       1025,
-					IndexID:       indexID,
-					BuildID:       buildID,
-					NodeID:        0,
-					IndexVersion:  0,
-					IndexState:    commonpb.IndexState_Unissued,
-					FailReason:    "",
-					IsDeleted:     false,
-					CreateTime:    0,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        1025,
+					IndexID:        indexID,
+					BuildID:        buildID,
+					NodeID:         0,
+					IndexVersion:   0,
+					IndexState:     commonpb.IndexState_Unissued,
+					FailReason:     "",
+					IsDeleted:      false,
+					CreatedUTCTime: 0,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 			segID + 1: {
 				indexID: {
-					SegmentID:     segID + 1,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       1026,
-					IndexID:       indexID,
-					BuildID:       buildID + 1,
-					NodeID:        nodeID,
-					IndexVersion:  1,
-					IndexState:    commonpb.IndexState_InProgress,
-					FailReason:    "",
-					IsDeleted:     false,
-					CreateTime:    1111,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID + 1,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        1026,
+					IndexID:        indexID,
+					BuildID:        buildID + 1,
+					NodeID:         nodeID,
+					IndexVersion:   1,
+					IndexState:     commonpb.IndexState_InProgress,
+					FailReason:     "",
+					IsDeleted:      false,
+					CreatedUTCTime: 1111,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 			segID + 2: {
 				indexID: {
-					SegmentID:     segID + 2,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       1026,
-					IndexID:       indexID,
-					BuildID:       buildID + 2,
-					NodeID:        nodeID,
-					IndexVersion:  1,
-					IndexState:    commonpb.IndexState_InProgress,
-					FailReason:    "",
-					IsDeleted:     true,
-					CreateTime:    1111,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID + 2,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        1026,
+					IndexID:        indexID,
+					BuildID:        buildID + 2,
+					NodeID:         nodeID,
+					IndexVersion:   1,
+					IndexState:     commonpb.IndexState_InProgress,
+					FailReason:     "",
+					IsDeleted:      true,
+					CreatedUTCTime: 1111,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 			segID + 3: {
 				indexID: {
-					SegmentID:     segID + 3,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       500,
-					IndexID:       indexID,
-					BuildID:       buildID + 3,
-					NodeID:        0,
-					IndexVersion:  0,
-					IndexState:    commonpb.IndexState_Unissued,
-					FailReason:    "",
-					IsDeleted:     false,
-					CreateTime:    1111,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID + 3,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        500,
+					IndexID:        indexID,
+					BuildID:        buildID + 3,
+					NodeID:         0,
+					IndexVersion:   0,
+					IndexState:     commonpb.IndexState_Unissued,
+					FailReason:     "",
+					IsDeleted:      false,
+					CreatedUTCTime: 1111,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 			segID + 4: {
 				indexID: {
-					SegmentID:     segID + 4,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       1026,
-					IndexID:       indexID,
-					BuildID:       buildID + 4,
-					NodeID:        nodeID,
-					IndexVersion:  1,
-					IndexState:    commonpb.IndexState_Finished,
-					FailReason:    "",
-					IsDeleted:     false,
-					CreateTime:    1111,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID + 4,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        1026,
+					IndexID:        indexID,
+					BuildID:        buildID + 4,
+					NodeID:         nodeID,
+					IndexVersion:   1,
+					IndexState:     commonpb.IndexState_Finished,
+					FailReason:     "",
+					IsDeleted:      false,
+					CreatedUTCTime: 1111,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 			segID + 5: {
 				indexID: {
-					SegmentID:     segID + 5,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       1026,
-					IndexID:       indexID,
-					BuildID:       buildID + 5,
-					NodeID:        0,
-					IndexVersion:  1,
-					IndexState:    commonpb.IndexState_Finished,
-					FailReason:    "",
-					IsDeleted:     false,
-					CreateTime:    1111,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID + 5,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        1026,
+					IndexID:        indexID,
+					BuildID:        buildID + 5,
+					NodeID:         0,
+					IndexVersion:   1,
+					IndexState:     commonpb.IndexState_Finished,
+					FailReason:     "",
+					IsDeleted:      false,
+					CreatedUTCTime: 1111,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 			segID + 6: {
 				indexID: {
-					SegmentID:     segID + 6,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       1026,
-					IndexID:       indexID,
-					BuildID:       buildID + 6,
-					NodeID:        0,
-					IndexVersion:  1,
-					IndexState:    commonpb.IndexState_Finished,
-					FailReason:    "",
-					IsDeleted:     false,
-					CreateTime:    1111,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID + 6,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        1026,
+					IndexID:        indexID,
+					BuildID:        buildID + 6,
+					NodeID:         0,
+					IndexVersion:   1,
+					IndexState:     commonpb.IndexState_Finished,
+					FailReason:     "",
+					IsDeleted:      false,
+					CreatedUTCTime: 1111,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 			segID + 7: {
 				indexID: {
-					SegmentID:     segID + 7,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       1026,
-					IndexID:       indexID,
-					BuildID:       buildID + 7,
-					NodeID:        0,
-					IndexVersion:  1,
-					IndexState:    commonpb.IndexState_Failed,
-					FailReason:    "error",
-					IsDeleted:     false,
-					CreateTime:    1111,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID + 7,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        1026,
+					IndexID:        indexID,
+					BuildID:        buildID + 7,
+					NodeID:         0,
+					IndexVersion:   1,
+					IndexState:     commonpb.IndexState_Failed,
+					FailReason:     "error",
+					IsDeleted:      false,
+					CreatedUTCTime: 1111,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 			segID + 8: {
 				indexID: {
-					SegmentID:     segID + 8,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       1026,
-					IndexID:       indexID,
-					BuildID:       buildID + 8,
-					NodeID:        nodeID + 1,
-					IndexVersion:  1,
-					IndexState:    commonpb.IndexState_InProgress,
-					FailReason:    "",
-					IsDeleted:     false,
-					CreateTime:    1111,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID + 8,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        1026,
+					IndexID:        indexID,
+					BuildID:        buildID + 8,
+					NodeID:         nodeID + 1,
+					IndexVersion:   1,
+					IndexState:     commonpb.IndexState_InProgress,
+					FailReason:     "",
+					IsDeleted:      false,
+					CreatedUTCTime: 1111,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 			segID + 9: {
 				indexID: {
-					SegmentID:     segID + 9,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       500,
-					IndexID:       indexID,
-					BuildID:       buildID + 9,
-					NodeID:        0,
-					IndexVersion:  0,
-					IndexState:    commonpb.IndexState_Unissued,
-					FailReason:    "",
-					IsDeleted:     false,
-					CreateTime:    1111,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID + 9,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        500,
+					IndexID:        indexID,
+					BuildID:        buildID + 9,
+					NodeID:         0,
+					IndexVersion:   0,
+					IndexState:     commonpb.IndexState_Unissued,
+					FailReason:     "",
+					IsDeleted:      false,
+					CreatedUTCTime: 1111,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 			segID + 10: {
 				indexID: {
-					SegmentID:     segID + 10,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       500,
-					IndexID:       indexID,
-					BuildID:       buildID + 10,
-					NodeID:        nodeID,
-					IndexVersion:  0,
-					IndexState:    commonpb.IndexState_Unissued,
-					FailReason:    "",
-					IsDeleted:     false,
-					CreateTime:    1111,
-					IndexFileKeys: nil,
-					IndexSize:     1,
+					SegmentID:      segID + 10,
+					CollectionID:   collID,
+					PartitionID:    partID,
+					NumRows:        500,
+					IndexID:        indexID,
+					BuildID:        buildID + 10,
+					NodeID:         nodeID,
+					IndexVersion:   0,
+					IndexState:     commonpb.IndexState_Unissued,
+					FailReason:     "",
+					IsDeleted:      false,
+					CreatedUTCTime: 1111,
+					IndexFileKeys:  nil,
+					IndexSize:      1,
 				},
 			},
 		},
-		buildID2SegmentIndex: map[UniqueID]*model.SegmentIndex{
-			buildID: {
-				SegmentID:     segID,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       1025,
-				IndexID:       indexID,
-				BuildID:       buildID,
-				NodeID:        0,
-				IndexVersion:  0,
-				IndexState:    commonpb.IndexState_Unissued,
-				FailReason:    "",
-				IsDeleted:     false,
-				CreateTime:    0,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-			buildID + 1: {
-				SegmentID:     segID + 1,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       1026,
-				IndexID:       indexID,
-				BuildID:       buildID + 1,
-				NodeID:        nodeID,
-				IndexVersion:  1,
-				IndexState:    commonpb.IndexState_InProgress,
-				FailReason:    "",
-				IsDeleted:     false,
-				CreateTime:    1111,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-			buildID + 2: {
-				SegmentID:     segID + 2,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       1026,
-				IndexID:       indexID,
-				BuildID:       buildID + 2,
-				NodeID:        nodeID,
-				IndexVersion:  1,
-				IndexState:    commonpb.IndexState_InProgress,
-				FailReason:    "",
-				IsDeleted:     true,
-				CreateTime:    1111,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-			buildID + 3: {
-				SegmentID:     segID + 3,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       500,
-				IndexID:       indexID,
-				BuildID:       buildID + 3,
-				NodeID:        0,
-				IndexVersion:  0,
-				IndexState:    commonpb.IndexState_Unissued,
-				FailReason:    "",
-				IsDeleted:     false,
-				CreateTime:    1111,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-			buildID + 4: {
-				SegmentID:     segID + 4,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       1026,
-				IndexID:       indexID,
-				BuildID:       buildID + 4,
-				NodeID:        nodeID,
-				IndexVersion:  1,
-				IndexState:    commonpb.IndexState_Finished,
-				FailReason:    "",
-				IsDeleted:     false,
-				CreateTime:    1111,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-			buildID + 5: {
-				SegmentID:     segID + 5,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       1026,
-				IndexID:       indexID,
-				BuildID:       buildID + 5,
-				NodeID:        0,
-				IndexVersion:  1,
-				IndexState:    commonpb.IndexState_Finished,
-				FailReason:    "",
-				IsDeleted:     false,
-				CreateTime:    1111,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-			buildID + 6: {
-				SegmentID:     segID + 6,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       1026,
-				IndexID:       indexID,
-				BuildID:       buildID + 6,
-				NodeID:        0,
-				IndexVersion:  1,
-				IndexState:    commonpb.IndexState_Finished,
-				FailReason:    "",
-				IsDeleted:     false,
-				CreateTime:    1111,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-			buildID + 7: {
-				SegmentID:     segID + 7,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       1026,
-				IndexID:       indexID,
-				BuildID:       buildID + 7,
-				NodeID:        0,
-				IndexVersion:  1,
-				IndexState:    commonpb.IndexState_Failed,
-				FailReason:    "error",
-				IsDeleted:     false,
-				CreateTime:    1111,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-			buildID + 8: {
-				SegmentID:     segID + 8,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       1026,
-				IndexID:       indexID,
-				BuildID:       buildID + 8,
-				NodeID:        nodeID + 1,
-				IndexVersion:  1,
-				IndexState:    commonpb.IndexState_InProgress,
-				FailReason:    "",
-				IsDeleted:     false,
-				CreateTime:    1111,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-			buildID + 9: {
-				SegmentID:     segID + 9,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       500,
-				IndexID:       indexID,
-				BuildID:       buildID + 9,
-				NodeID:        0,
-				IndexVersion:  0,
-				IndexState:    commonpb.IndexState_Unissued,
-				FailReason:    "",
-				IsDeleted:     false,
-				CreateTime:    1111,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-			buildID + 10: {
-				SegmentID:     segID + 10,
-				CollectionID:  collID,
-				PartitionID:   partID,
-				NumRows:       500,
-				IndexID:       indexID,
-				BuildID:       buildID + 10,
-				NodeID:        nodeID,
-				IndexVersion:  0,
-				IndexState:    commonpb.IndexState_Unissued,
-				FailReason:    "",
-				IsDeleted:     false,
-				CreateTime:    1111,
-				IndexFileKeys: nil,
-				IndexSize:     1,
-			},
-		},
+		segmentBuildInfo: indexBuildInfo,
 	}
 }
 
@@ -769,7 +779,7 @@ func (s *taskSchedulerSuite) scheduler(handler Handler) {
 		return nil
 	})
 	catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil)
-	//catalog.EXPECT().SaveStatsTask(mock.Anything, mock.Anything).Return(nil)
+	// catalog.EXPECT().SaveStatsTask(mock.Anything, mock.Anything).Return(nil)
 
 	in := mocks.NewMockIndexNodeClient(s.T())
 	in.EXPECT().CreateJobV2(mock.Anything, mock.Anything).Return(merr.Success(), nil)
@@ -833,7 +843,11 @@ func (s *taskSchedulerSuite) scheduler(handler Handler) {
 	workerManager.EXPECT().PickClient().Return(s.nodeID, in)
 	workerManager.EXPECT().GetClientByID(mock.Anything).Return(in, true)
 
-	mt := createMeta(catalog, withAnalyzeMeta(s.createAnalyzeMeta(catalog)), withIndexMeta(createIndexMeta(catalog)))
+	mt := createMeta(catalog, withAnalyzeMeta(s.createAnalyzeMeta(catalog)), withIndexMeta(createIndexMeta(catalog)),
+		withStatsTaskMeta(&statsTaskMeta{
+			ctx:     ctx,
+			catalog: catalog,
+		}))
 
 	cm := mocks.NewChunkManager(s.T())
 	cm.EXPECT().RootPath().Return("root")
@@ -856,7 +870,7 @@ func (s *taskSchedulerSuite) scheduler(handler Handler) {
 	scheduler.collectMetricsDuration = time.Millisecond * 200
 	scheduler.Start()
 
-	s.Run("enqueue", func() {
+	s.Run("Submit", func() {
 		taskID := int64(6)
 		newTask := &indexpb.AnalyzeTask{
 			CollectionID: s.collectionID,
@@ -975,9 +989,13 @@ func (s *taskSchedulerSuite) Test_analyzeTaskFailCase() {
 				},
 			}),
 			withIndexMeta(&indexMeta{
-				RWMutex: sync.RWMutex{},
 				ctx:     ctx,
 				catalog: catalog,
+			}),
+			withStatsTaskMeta(&statsTaskMeta{
+				ctx:     ctx,
+				catalog: catalog,
+				tasks:   nil,
 			}))
 
 		handler := NewNMockHandler(s.T())
@@ -1016,11 +1034,14 @@ func (s *taskSchedulerSuite) Test_analyzeTaskFailCase() {
 
 		workerManager := session.NewMockWorkerManager(s.T())
 
-		mt := createMeta(catalog, withAnalyzeMeta(s.createAnalyzeMeta(catalog)), withIndexMeta(&indexMeta{
-			RWMutex: sync.RWMutex{},
-			ctx:     ctx,
-			catalog: catalog,
-		}))
+		mt := createMeta(catalog, withAnalyzeMeta(s.createAnalyzeMeta(catalog)),
+			withIndexMeta(&indexMeta{
+				ctx:     ctx,
+				catalog: catalog,
+			}), withStatsTaskMeta(&statsTaskMeta{
+				ctx:     ctx,
+				catalog: catalog,
+			}))
 
 		handler := NewNMockHandler(s.T())
 		handler.EXPECT().GetCollection(mock.Anything, mock.Anything).Return(&collectionInfo{
@@ -1041,9 +1062,9 @@ func (s *taskSchedulerSuite) Test_analyzeTaskFailCase() {
 		scheduler := newTaskScheduler(ctx, mt, workerManager, nil, nil, handler, nil)
 
 		// remove task in meta
-		err := scheduler.meta.analyzeMeta.DropAnalyzeTask(1)
+		err := scheduler.meta.analyzeMeta.DropAnalyzeTask(context.TODO(), 1)
 		s.NoError(err)
-		err = scheduler.meta.analyzeMeta.DropAnalyzeTask(2)
+		err = scheduler.meta.analyzeMeta.DropAnalyzeTask(context.TODO(), 2)
 		s.NoError(err)
 
 		mt.segments.DropSegment(1000)
@@ -1245,6 +1266,7 @@ func (s *taskSchedulerSuite) Test_analyzeTaskFailCase() {
 func (s *taskSchedulerSuite) Test_indexTaskFailCase() {
 	s.Run("HNSW", func() {
 		ctx := context.Background()
+		indexNodeTasks := make(map[int64]int)
 
 		catalog := catalogmocks.NewDataCoordCatalog(s.T())
 		in := mocks.NewMockIndexNodeClient(s.T())
@@ -1285,17 +1307,7 @@ func (s *taskSchedulerSuite) Test_indexTaskFailCase() {
 						},
 					},
 				},
-				buildID2SegmentIndex: map[UniqueID]*model.SegmentIndex{
-					buildID: {
-						SegmentID:    segID,
-						CollectionID: s.collectionID,
-						PartitionID:  s.partitionID,
-						NumRows:      1025,
-						IndexID:      indexID,
-						BuildID:      buildID,
-						IndexState:   commonpb.IndexState_Unissued,
-					},
-				},
+				segmentBuildInfo: newSegmentIndexBuildInfo(),
 				segmentIndexes: map[UniqueID]map[UniqueID]*model.SegmentIndex{
 					segID: {
 						buildID: {
@@ -1309,8 +1321,21 @@ func (s *taskSchedulerSuite) Test_indexTaskFailCase() {
 						},
 					},
 				},
+			}),
+			withStatsTaskMeta(&statsTaskMeta{
+				ctx:     context.Background(),
+				catalog: catalog,
 			}))
 
+		mt.indexMeta.segmentBuildInfo.Add(&model.SegmentIndex{
+			SegmentID:    segID,
+			CollectionID: s.collectionID,
+			PartitionID:  s.partitionID,
+			NumRows:      1025,
+			IndexID:      indexID,
+			BuildID:      buildID,
+			IndexState:   commonpb.IndexState_Unissued,
+		})
 		cm := mocks.NewChunkManager(s.T())
 		cm.EXPECT().RootPath().Return("ut-index")
 
@@ -1338,10 +1363,19 @@ func (s *taskSchedulerSuite) Test_indexTaskFailCase() {
 		// assign failed --> retry
 		workerManager.EXPECT().PickClient().Return(s.nodeID, in).Once()
 		catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil).Once()
-		in.EXPECT().CreateJobV2(mock.Anything, mock.Anything).Return(nil, errors.New("mock error")).Once()
+		in.EXPECT().CreateJobV2(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, request *workerpb.CreateJobV2Request, option ...grpc.CallOption) (*commonpb.Status, error) {
+			indexNodeTasks[request.GetTaskID()]++
+			return nil, errors.New("mock error")
+		}).Once()
 
 		// retry --> init
-		workerManager.EXPECT().GetClientByID(mock.Anything).Return(nil, false).Once()
+		workerManager.EXPECT().GetClientByID(mock.Anything).Return(in, true).Once()
+		in.EXPECT().DropJobsV2(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, request *workerpb.DropJobsV2Request, option ...grpc.CallOption) (*commonpb.Status, error) {
+			for _, taskID := range request.GetTaskIDs() {
+				indexNodeTasks[taskID]--
+			}
+			return &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}, nil
+		}).Once()
 
 		// init --> inProgress
 		workerManager.EXPECT().PickClient().Return(s.nodeID, in).Once()
@@ -1355,7 +1389,10 @@ func (s *taskSchedulerSuite) Test_indexTaskFailCase() {
 				},
 			},
 		}, nil).Once()
-		in.EXPECT().CreateJobV2(mock.Anything, mock.Anything).Return(&commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}, nil).Once()
+		in.EXPECT().CreateJobV2(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, request *workerpb.CreateJobV2Request, option ...grpc.CallOption) (*commonpb.Status, error) {
+			indexNodeTasks[request.GetTaskID()]++
+			return &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}, nil
+		}).Once()
 
 		// inProgress --> Finished
 		workerManager.EXPECT().GetClientByID(mock.Anything).Return(in, true).Once()
@@ -1378,7 +1415,13 @@ func (s *taskSchedulerSuite) Test_indexTaskFailCase() {
 
 		// finished --> done
 		catalog.EXPECT().AlterSegmentIndexes(mock.Anything, mock.Anything).Return(nil).Once()
-		workerManager.EXPECT().GetClientByID(mock.Anything).Return(nil, false).Once()
+		workerManager.EXPECT().GetClientByID(mock.Anything).Return(in, true).Once()
+		in.EXPECT().DropJobsV2(mock.Anything, mock.Anything).RunAndReturn(func(ctx context.Context, request *workerpb.DropJobsV2Request, option ...grpc.CallOption) (*commonpb.Status, error) {
+			for _, taskID := range request.GetTaskIDs() {
+				indexNodeTasks[taskID]--
+			}
+			return &commonpb.Status{ErrorCode: commonpb.ErrorCode_Success}, nil
+		}).Once()
 
 		for {
 			scheduler.RLock()
@@ -1396,6 +1439,10 @@ func (s *taskSchedulerSuite) Test_indexTaskFailCase() {
 		indexJob, exist := mt.indexMeta.GetIndexJob(buildID)
 		s.True(exist)
 		s.Equal(commonpb.IndexState_Finished, indexJob.IndexState)
+
+		for _, v := range indexNodeTasks {
+			s.Zero(v)
+		}
 	})
 }
 
@@ -1432,7 +1479,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 				},
 				{
 					Key:   common.IndexTypeKey,
-					Value: indexparamcheck.IndexHNSW,
+					Value: "HNSW",
 				},
 			},
 		},
@@ -1485,7 +1532,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 							},
 							{
 								Key:   common.IndexTypeKey,
-								Value: indexparamcheck.IndexHNSW,
+								Value: "HNSW",
 							},
 						},
 					},
@@ -1494,41 +1541,24 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 			segmentIndexes: map[UniqueID]map[UniqueID]*model.SegmentIndex{
 				segID: {
 					indexID: {
-						SegmentID:     segID,
-						CollectionID:  collID,
-						PartitionID:   partID,
-						NumRows:       minNumberOfRowsToBuild,
-						IndexID:       indexID,
-						BuildID:       buildID,
-						NodeID:        0,
-						IndexVersion:  0,
-						IndexState:    commonpb.IndexState_Unissued,
-						FailReason:    "",
-						IsDeleted:     false,
-						CreateTime:    0,
-						IndexFileKeys: nil,
-						IndexSize:     0,
+						SegmentID:      segID,
+						CollectionID:   collID,
+						PartitionID:    partID,
+						NumRows:        minNumberOfRowsToBuild,
+						IndexID:        indexID,
+						BuildID:        buildID,
+						NodeID:         0,
+						IndexVersion:   0,
+						IndexState:     commonpb.IndexState_Unissued,
+						FailReason:     "",
+						IsDeleted:      false,
+						CreatedUTCTime: 0,
+						IndexFileKeys:  nil,
+						IndexSize:      0,
 					},
 				},
 			},
-			buildID2SegmentIndex: map[UniqueID]*model.SegmentIndex{
-				buildID: {
-					SegmentID:     segID,
-					CollectionID:  collID,
-					PartitionID:   partID,
-					NumRows:       minNumberOfRowsToBuild,
-					IndexID:       indexID,
-					BuildID:       buildID,
-					NodeID:        0,
-					IndexVersion:  0,
-					IndexState:    commonpb.IndexState_Unissued,
-					FailReason:    "",
-					IsDeleted:     false,
-					CreateTime:    0,
-					IndexFileKeys: nil,
-					IndexSize:     0,
-				},
-			},
+			segmentBuildInfo: newSegmentIndexBuildInfo(),
 		},
 		segments: &SegmentsInfo{
 			segments: map[UniqueID]*SegmentInfo{
@@ -1546,8 +1576,28 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 				},
 			},
 		},
+		statsTaskMeta: &statsTaskMeta{
+			ctx:     context.Background(),
+			catalog: catalog,
+		},
 	}
 
+	mt.indexMeta.segmentBuildInfo.Add(&model.SegmentIndex{
+		SegmentID:      segID,
+		CollectionID:   collID,
+		PartitionID:    partID,
+		NumRows:        minNumberOfRowsToBuild,
+		IndexID:        indexID,
+		BuildID:        buildID,
+		NodeID:         0,
+		IndexVersion:   0,
+		IndexState:     commonpb.IndexState_Unissued,
+		FailReason:     "",
+		IsDeleted:      false,
+		CreatedUTCTime: 0,
+		IndexFileKeys:  nil,
+		IndexSize:      0,
+	})
 	cm := mocks.NewChunkManager(s.T())
 	cm.EXPECT().RootPath().Return("ut-index")
 
@@ -1580,9 +1630,11 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 	}
 
 	resetMetaFunc := func() {
-		mt.indexMeta.buildID2SegmentIndex[buildID].IndexState = commonpb.IndexState_Unissued
+		t, ok := mt.indexMeta.segmentBuildInfo.Get(buildID)
+		s.True(ok)
+		t.IndexState = commonpb.IndexState_Unissued
 		mt.indexMeta.segmentIndexes[segID][indexID].IndexState = commonpb.IndexState_Unissued
-		mt.indexMeta.indexes[collID][indexID].IndexParams[1].Value = indexparamcheck.IndexHNSW
+		mt.indexMeta.indexes[collID][indexID].IndexParams[1].Value = "HNSW"
 		mt.collections[collID].Schema.Fields[0].DataType = schemapb.DataType_FloatVector
 		mt.collections[collID].Schema.Fields[1].IsPartitionKey = true
 		mt.collections[collID].Schema.Fields[1].DataType = schemapb.DataType_VarChar
@@ -1635,7 +1687,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 		resetMetaFunc()
 	})
 
-	s.Run("enqueue valid", func() {
+	s.Run("Submit valid", func() {
 		for _, dataType := range []schemapb.DataType{
 			schemapb.DataType_Int8,
 			schemapb.DataType_Int16,
@@ -1666,7 +1718,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 	})
 
 	// should still be able to build vec index when opt field is not set
-	s.Run("enqueue returns empty optional field when cfg disable", func() {
+	s.Run("Submit returns empty optional field when cfg disable", func() {
 		paramtable.Get().CommonCfg.EnableMaterializedView.SwapTempValue("false")
 		in.EXPECT().CreateJobV2(mock.Anything, mock.Anything).RunAndReturn(
 			func(ctx context.Context, in *workerpb.CreateJobV2Request, opts ...grpc.CallOption) (*commonpb.Status, error) {
@@ -1687,7 +1739,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 		resetMetaFunc()
 	})
 
-	s.Run("enqueue returns empty when vector type is not dense vector", func() {
+	s.Run("Submit returns empty when vector type is not dense vector", func() {
 		paramtable.Get().CommonCfg.EnableMaterializedView.SwapTempValue("true")
 		for _, dataType := range []schemapb.DataType{
 			schemapb.DataType_SparseFloatVector,
@@ -1713,7 +1765,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 		}
 	})
 
-	s.Run("enqueue returns empty optional field when the data type is not STRING or VARCHAR or Integer", func() {
+	s.Run("Submit returns empty optional field when the data type is not STRING or VARCHAR or Integer", func() {
 		paramtable.Get().CommonCfg.EnableMaterializedView.SwapTempValue("true")
 		for _, dataType := range []schemapb.DataType{
 			schemapb.DataType_Bool,
@@ -1743,7 +1795,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 		}
 	})
 
-	s.Run("enqueue returns empty optional field when no partition key", func() {
+	s.Run("Submit returns empty optional field when no partition key", func() {
 		paramtable.Get().CommonCfg.EnableMaterializedView.SwapTempValue("true")
 		mt.collections[collID].Schema.Fields[1].IsPartitionKey = false
 		in.EXPECT().CreateJobV2(mock.Anything, mock.Anything).RunAndReturn(
@@ -1765,7 +1817,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 		resetMetaFunc()
 	})
 
-	s.Run("enqueue partitionKeyIsolation is false when schema is not set", func() {
+	s.Run("Submit partitionKeyIsolation is false when schema is not set", func() {
 		paramtable.Get().CommonCfg.EnableMaterializedView.SwapTempValue("true")
 		in.EXPECT().CreateJobV2(mock.Anything, mock.Anything).RunAndReturn(
 			func(ctx context.Context, in *workerpb.CreateJobV2Request, opts ...grpc.CallOption) (*commonpb.Status, error) {
@@ -1804,7 +1856,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 	scheduler_isolation := newTaskScheduler(ctx, &mt, workerManager, cm, newIndexEngineVersionManager(), handler_isolation, nil)
 	scheduler_isolation.Start()
 
-	s.Run("enqueue partitionKeyIsolation is false when MV not enabled", func() {
+	s.Run("Submit partitionKeyIsolation is false when MV not enabled", func() {
 		paramtable.Get().CommonCfg.EnableMaterializedView.SwapTempValue("false")
 		in.EXPECT().CreateJobV2(mock.Anything, mock.Anything).RunAndReturn(
 			func(ctx context.Context, in *workerpb.CreateJobV2Request, opts ...grpc.CallOption) (*commonpb.Status, error) {
@@ -1825,7 +1877,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 		resetMetaFunc()
 	})
 
-	s.Run("enqueue partitionKeyIsolation is true when MV enabled", func() {
+	s.Run("Submit partitionKeyIsolation is true when MV enabled", func() {
 		paramtable.Get().CommonCfg.EnableMaterializedView.SwapTempValue("true")
 		defer paramtable.Get().CommonCfg.EnableMaterializedView.SwapTempValue("false")
 		isoCollInfo.Properties[common.PartitionKeyIsolationKey] = "true"
@@ -1848,7 +1900,7 @@ func (s *taskSchedulerSuite) Test_indexTaskWithMvOptionalScalarField() {
 		resetMetaFunc()
 	})
 
-	s.Run("enqueue partitionKeyIsolation is invalid when MV is enabled", func() {
+	s.Run("Submit partitionKeyIsolation is invalid when MV is enabled", func() {
 		paramtable.Get().CommonCfg.EnableMaterializedView.SwapTempValue("true")
 		defer paramtable.Get().CommonCfg.EnableMaterializedView.SwapTempValue("false")
 		isoCollInfo.Properties[common.PartitionKeyIsolationKey] = "invalid"

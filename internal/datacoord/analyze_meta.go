@@ -96,12 +96,12 @@ func (m *analyzeMeta) AddAnalyzeTask(task *indexpb.AnalyzeTask) error {
 	return m.saveTask(task)
 }
 
-func (m *analyzeMeta) DropAnalyzeTask(taskID int64) error {
+func (m *analyzeMeta) DropAnalyzeTask(ctx context.Context, taskID int64) error {
 	m.Lock()
 	defer m.Unlock()
 
 	log.Info("drop analyze task", zap.Int64("taskID", taskID))
-	if err := m.catalog.DropAnalyzeTask(m.ctx, taskID); err != nil {
+	if err := m.catalog.DropAnalyzeTask(ctx, taskID); err != nil {
 		log.Warn("drop analyze task by catalog failed", zap.Int64("taskID", taskID),
 			zap.Error(err))
 		return err
@@ -111,7 +111,7 @@ func (m *analyzeMeta) DropAnalyzeTask(taskID int64) error {
 	return nil
 }
 
-func (m *analyzeMeta) UpdateVersion(taskID int64) error {
+func (m *analyzeMeta) UpdateVersion(taskID int64, nodeID int64) error {
 	m.Lock()
 	defer m.Unlock()
 
@@ -122,11 +122,13 @@ func (m *analyzeMeta) UpdateVersion(taskID int64) error {
 
 	cloneT := proto.Clone(t).(*indexpb.AnalyzeTask)
 	cloneT.Version++
-	log.Info("update task version", zap.Int64("taskID", taskID), zap.Int64("newVersion", cloneT.Version))
+	cloneT.NodeID = nodeID
+	log.Info("update task version", zap.Int64("taskID", taskID), zap.Int64("newVersion", cloneT.Version),
+		zap.Int64("nodeID", nodeID))
 	return m.saveTask(cloneT)
 }
 
-func (m *analyzeMeta) BuildingTask(taskID, nodeID int64) error {
+func (m *analyzeMeta) BuildingTask(taskID int64) error {
 	m.Lock()
 	defer m.Unlock()
 
@@ -136,9 +138,8 @@ func (m *analyzeMeta) BuildingTask(taskID, nodeID int64) error {
 	}
 
 	cloneT := proto.Clone(t).(*indexpb.AnalyzeTask)
-	cloneT.NodeID = nodeID
 	cloneT.State = indexpb.JobState_JobStateInProgress
-	log.Info("task will be building", zap.Int64("taskID", taskID), zap.Int64("nodeID", nodeID))
+	log.Info("task will be building", zap.Int64("taskID", taskID))
 
 	return m.saveTask(cloneT)
 }

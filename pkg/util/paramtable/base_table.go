@@ -64,9 +64,10 @@ func globalConfigPrefixs() []string {
 	return []string{"metastore", "localStorage", "etcd", "tikv", "minio", "pulsar", "kafka", "rocksmq", "log", "grpc", "common", "quotaAndLimits", "trace"}
 }
 
-// support read "milvus.yaml", "default.yaml", "user.yaml" as this order.
-// order: milvus.yaml < default.yaml < user.yaml, do not change the order below
-var defaultYaml = []string{"milvus.yaml", "default.yaml", "user.yaml"}
+// support read "milvus.yaml", "_test.yaml", "default.yaml", "user.yaml" as this order.
+// order: milvus.yaml < _test.yaml < default.yaml < user.yaml, do not change the order below.
+// Use _test.yaml only for test related purpose.
+var defaultYaml = []string{"milvus.yaml", "_test.yaml", "default.yaml", "user.yaml"}
 
 // BaseTable the basics of paramtable
 type BaseTable struct {
@@ -103,7 +104,7 @@ func SkipRemote(skip bool) Option {
 	}
 }
 
-func skipEnv(skip bool) Option {
+func SkipEnv(skip bool) Option {
 	return func(bt *baseTableConfig) {
 		bt.skipEnv = skip
 	}
@@ -112,7 +113,7 @@ func skipEnv(skip bool) Option {
 // NewBaseTableFromYamlOnly only used in migration tool.
 // Maybe we shouldn't limit the configDir internally.
 func NewBaseTableFromYamlOnly(yaml string) *BaseTable {
-	return NewBaseTable(Files([]string{yaml}), SkipRemote(true), skipEnv(true))
+	return NewBaseTable(Files([]string{yaml}), SkipRemote(true), SkipEnv(true))
 }
 
 func NewBaseTable(opts ...Option) *BaseTable {

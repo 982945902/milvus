@@ -118,15 +118,18 @@ func (at *analyzeTask) GetFailReason() string {
 	return at.taskInfo.GetFailReason()
 }
 
-func (at *analyzeTask) UpdateVersion(ctx context.Context, meta *meta) error {
-	return meta.analyzeMeta.UpdateVersion(at.GetTaskID())
-}
-
-func (at *analyzeTask) UpdateMetaBuildingState(nodeID int64, meta *meta) error {
-	if err := meta.analyzeMeta.BuildingTask(at.GetTaskID(), nodeID); err != nil {
+func (at *analyzeTask) UpdateVersion(ctx context.Context, nodeID int64, meta *meta) error {
+	if err := meta.analyzeMeta.UpdateVersion(at.GetTaskID(), nodeID); err != nil {
 		return err
 	}
 	at.nodeID = nodeID
+	return nil
+}
+
+func (at *analyzeTask) UpdateMetaBuildingState(meta *meta) error {
+	if err := meta.analyzeMeta.BuildingTask(at.GetTaskID()); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -153,7 +156,7 @@ func (at *analyzeTask) PreCheck(ctx context.Context, dependency *taskScheduler) 
 	}
 
 	// When data analyze occurs, segments must not be discarded. Such as compaction, GC, etc.
-	segments := dependency.meta.SelectSegments(SegmentFilterFunc(func(info *SegmentInfo) bool {
+	segments := dependency.meta.SelectSegments(ctx, SegmentFilterFunc(func(info *SegmentInfo) bool {
 		return isSegmentHealthy(info) && slices.Contains(t.SegmentIDs, info.ID)
 	}))
 	segmentsMap := lo.SliceToMap(segments, func(t *SegmentInfo) (int64, *SegmentInfo) {
@@ -254,6 +257,8 @@ func (at *analyzeTask) setResult(result *workerpb.AnalyzeResult) {
 }
 
 func (at *analyzeTask) QueryResult(ctx context.Context, client types.IndexNodeClient) {
+	ctx, cancel := context.WithTimeout(context.Background(), reqTimeoutInterval)
+	defer cancel()
 	resp, err := client.QueryJobsV2(ctx, &workerpb.QueryJobsV2Request{
 		ClusterID: Params.CommonCfg.ClusterPrefix.GetValue(),
 		TaskIDs:   []int64{at.GetTaskID()},
@@ -292,6 +297,8 @@ func (at *analyzeTask) QueryResult(ctx context.Context, client types.IndexNodeCl
 }
 
 func (at *analyzeTask) DropTaskOnWorker(ctx context.Context, client types.IndexNodeClient) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), reqTimeoutInterval)
+	defer cancel()
 	resp, err := client.DropJobsV2(ctx, &workerpb.DropJobsV2Request{
 		ClusterID: Params.CommonCfg.ClusterPrefix.GetValue(),
 		TaskIDs:   []UniqueID{at.GetTaskID()},

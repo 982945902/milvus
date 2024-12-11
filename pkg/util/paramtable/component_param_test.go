@@ -134,6 +134,10 @@ func TestComponentParam(t *testing.T) {
 		assert.Equal(t, 0, len(Params.ReadOnlyPrivileges.GetAsStrings()))
 		assert.Equal(t, 0, len(Params.ReadWritePrivileges.GetAsStrings()))
 		assert.Equal(t, 0, len(Params.AdminPrivileges.GetAsStrings()))
+
+		assert.False(t, params.CommonCfg.LocalRPCEnabled.GetAsBool())
+		params.Save("common.localRPCEnabled", "true")
+		assert.True(t, params.CommonCfg.LocalRPCEnabled.GetAsBool())
 	})
 
 	t.Run("test rootCoordConfig", func(t *testing.T) {
@@ -148,6 +152,10 @@ func TestComponentParam(t *testing.T) {
 
 		params.Save("rootCoord.gracefulStopTimeout", "100")
 		assert.Equal(t, 100*time.Second, Params.GracefulStopTimeout.GetAsDuration(time.Second))
+
+		assert.Equal(t, "{}", Params.DefaultDBProperties.GetValue())
+		params.Save("rootCoord.defaultDBProperties", "{\"key\":\"value\"}")
+		assert.Equal(t, "{\"key\":\"value\"}", Params.DefaultDBProperties.GetValue())
 
 		SetCreateTime(time.Now())
 		SetUpdateTime(time.Now())
@@ -208,6 +216,18 @@ func TestComponentParam(t *testing.T) {
 		assert.False(t, Params.SkipPartitionKeyCheck.GetAsBool())
 		params.Save("proxy.skipPartitionKeyCheck", "true")
 		assert.True(t, Params.SkipPartitionKeyCheck.GetAsBool())
+
+		assert.Equal(t, int64(10), Params.CheckWorkloadRequestNum.GetAsInt64())
+		assert.Equal(t, float64(0.1), Params.WorkloadToleranceFactor.GetAsFloat())
+
+		assert.Equal(t, int64(16), Params.DDLConcurrency.GetAsInt64())
+		assert.Equal(t, int64(16), Params.DCLConcurrency.GetAsInt64())
+
+		assert.Equal(t, 72, Params.MaxPasswordLength.GetAsInt())
+		params.Save("proxy.maxPasswordLength", "100")
+		assert.Equal(t, 72, Params.MaxPasswordLength.GetAsInt())
+		params.Save("proxy.maxPasswordLength", "-10")
+		assert.Equal(t, 72, Params.MaxPasswordLength.GetAsInt())
 	})
 
 	// t.Run("test proxyConfig panic", func(t *testing.T) {
@@ -323,8 +343,8 @@ func TestComponentParam(t *testing.T) {
 
 		assert.Equal(t, 1000, Params.SegmentCheckInterval.GetAsInt())
 		assert.Equal(t, 1000, Params.ChannelCheckInterval.GetAsInt())
-		params.Save(Params.BalanceCheckInterval.Key, "10000")
-		assert.Equal(t, 10000, Params.BalanceCheckInterval.GetAsInt())
+		params.Save(Params.BalanceCheckInterval.Key, "3000")
+		assert.Equal(t, 3000, Params.BalanceCheckInterval.GetAsInt())
 		assert.Equal(t, 10000, Params.IndexCheckInterval.GetAsInt())
 		assert.Equal(t, 3, Params.CollectionRecoverTimesLimit.GetAsInt())
 		assert.Equal(t, true, Params.AutoBalance.GetAsBool())
@@ -349,9 +369,12 @@ func TestComponentParam(t *testing.T) {
 
 		assert.Equal(t, 0.1, Params.DelegatorMemoryOverloadFactor.GetAsFloat())
 		assert.Equal(t, 5, Params.CollectionBalanceSegmentBatchSize.GetAsInt())
+		assert.Equal(t, 1, Params.CollectionBalanceChannelBatchSize.GetAsInt())
 
 		assert.Equal(t, 0, Params.ClusterLevelLoadReplicaNumber.GetAsInt())
 		assert.Len(t, Params.ClusterLevelLoadResourceGroups.GetAsStrings(), 0)
+
+		assert.Equal(t, 10, Params.CollectionChannelCountFactor.GetAsInt())
 	})
 
 	t.Run("test queryNodeConfig", func(t *testing.T) {
@@ -454,6 +477,8 @@ func TestComponentParam(t *testing.T) {
 
 		assert.Equal(t, 4, Params.BloomFilterApplyParallelFactor.GetAsInt())
 		assert.Equal(t, "/var/lib/milvus/data/mmap", Params.MmapDirPath.GetValue())
+
+		assert.Equal(t, true, Params.MmapChunkCache.GetAsBool())
 	})
 
 	t.Run("test dataCoordConfig", func(t *testing.T) {
@@ -474,6 +499,7 @@ func TestComponentParam(t *testing.T) {
 		assert.Equal(t, 2*time.Second, Params.ImportCheckIntervalHigh.GetAsDuration(time.Second))
 		assert.Equal(t, 120*time.Second, Params.ImportCheckIntervalLow.GetAsDuration(time.Second))
 		assert.Equal(t, 1024, Params.MaxFilesPerImportReq.GetAsInt())
+		assert.Equal(t, 1024, Params.MaxImportJobNum.GetAsInt())
 		assert.Equal(t, true, Params.WaitForIndex.GetAsBool())
 
 		params.Save("datacoord.gracefulStopTimeout", "100")
@@ -506,6 +532,7 @@ func TestComponentParam(t *testing.T) {
 		assert.Equal(t, 4, Params.L0DeleteCompactionSlotUsage.GetAsInt())
 		params.Save("datacoord.scheduler.taskSlowThreshold", "1000")
 		assert.Equal(t, 1000*time.Second, Params.TaskSlowThreshold.GetAsDuration(time.Second))
+		assert.Equal(t, 32, Params.MaxConcurrentChannelTaskNumPerDN.GetAsInt())
 	})
 
 	t.Run("test dataNodeConfig", func(t *testing.T) {
@@ -556,6 +583,7 @@ func TestComponentParam(t *testing.T) {
 		assert.Equal(t, 16, maxConcurrentImportTaskNum)
 		assert.Equal(t, int64(16), Params.MaxImportFileSizeInGB.GetAsInt64())
 		assert.Equal(t, 16, Params.ReadBufferSizeInMB.GetAsInt())
+		assert.Equal(t, 16, Params.MaxTaskSlotNum.GetAsInt())
 		params.Save("datanode.gracefulStopTimeout", "100")
 		assert.Equal(t, 100*time.Second, Params.GracefulStopTimeout.GetAsDuration(time.Second))
 		assert.Equal(t, 16, Params.SlotCap.GetAsInt())
@@ -578,16 +606,19 @@ func TestComponentParam(t *testing.T) {
 		assert.Equal(t, 100*time.Second, Params.GracefulStopTimeout.GetAsDuration(time.Second))
 	})
 
-	t.Run("test streamingCoordConfig", func(t *testing.T) {
-		assert.Equal(t, 1*time.Minute, params.StreamingCoordCfg.AutoBalanceTriggerInterval.GetAsDurationByParse())
-		assert.Equal(t, 50*time.Millisecond, params.StreamingCoordCfg.AutoBalanceBackoffInitialInterval.GetAsDurationByParse())
-		assert.Equal(t, 2.0, params.StreamingCoordCfg.AutoBalanceBackoffMultiplier.GetAsFloat())
-		params.Save(params.StreamingCoordCfg.AutoBalanceTriggerInterval.Key, "50s")
-		params.Save(params.StreamingCoordCfg.AutoBalanceBackoffInitialInterval.Key, "50s")
-		params.Save(params.StreamingCoordCfg.AutoBalanceBackoffMultiplier.Key, "3.5")
-		assert.Equal(t, 50*time.Second, params.StreamingCoordCfg.AutoBalanceTriggerInterval.GetAsDurationByParse())
-		assert.Equal(t, 50*time.Second, params.StreamingCoordCfg.AutoBalanceBackoffInitialInterval.GetAsDurationByParse())
-		assert.Equal(t, 3.5, params.StreamingCoordCfg.AutoBalanceBackoffMultiplier.GetAsFloat())
+	t.Run("test streamingConfig", func(t *testing.T) {
+		assert.Equal(t, 1*time.Minute, params.StreamingCfg.WALBalancerTriggerInterval.GetAsDurationByParse())
+		assert.Equal(t, 50*time.Millisecond, params.StreamingCfg.WALBalancerBackoffInitialInterval.GetAsDurationByParse())
+		assert.Equal(t, 2.0, params.StreamingCfg.WALBalancerBackoffMultiplier.GetAsFloat())
+		assert.Equal(t, 10*time.Second, params.StreamingCfg.TxnDefaultKeepaliveTimeout.GetAsDurationByParse())
+		params.Save(params.StreamingCfg.WALBalancerTriggerInterval.Key, "50s")
+		params.Save(params.StreamingCfg.WALBalancerBackoffInitialInterval.Key, "50s")
+		params.Save(params.StreamingCfg.WALBalancerBackoffMultiplier.Key, "3.5")
+		params.Save(params.StreamingCfg.TxnDefaultKeepaliveTimeout.Key, "3500ms")
+		assert.Equal(t, 50*time.Second, params.StreamingCfg.WALBalancerTriggerInterval.GetAsDurationByParse())
+		assert.Equal(t, 50*time.Second, params.StreamingCfg.WALBalancerBackoffInitialInterval.GetAsDurationByParse())
+		assert.Equal(t, 3.5, params.StreamingCfg.WALBalancerBackoffMultiplier.GetAsFloat())
+		assert.Equal(t, 3500*time.Millisecond, params.StreamingCfg.TxnDefaultKeepaliveTimeout.GetAsDurationByParse())
 	})
 
 	t.Run("channel config priority", func(t *testing.T) {
@@ -640,6 +671,8 @@ func TestCachedParam(t *testing.T) {
 	assert.Equal(t, uint64(8388608), params.ServiceParam.MQCfg.PursuitBufferSize.GetAsUint64())
 	assert.Equal(t, uint64(8388608), params.ServiceParam.MQCfg.PursuitBufferSize.GetAsUint64())
 
+	assert.Equal(t, 60, params.ServiceParam.MQCfg.PursuitBufferTime.GetAsInt())
+
 	assert.Equal(t, int64(1024), params.DataCoordCfg.SegmentMaxSize.GetAsInt64())
 	assert.Equal(t, int64(1024), params.DataCoordCfg.SegmentMaxSize.GetAsInt64())
 
@@ -656,4 +689,12 @@ func TestCachedParam(t *testing.T) {
 	assert.Equal(t, float64(256*1024*1024), params.QuotaConfig.DiskQuota.GetAsFloat())
 	assert.Equal(t, float64(256*1024*1024), params.QuotaConfig.DiskQuotaPerCollection.GetAsFloat())
 	params.Save(params.QuotaConfig.DiskQuota.Key, "192")
+}
+
+func TestFallbackParam(t *testing.T) {
+	Init()
+	params := Get()
+	params.Save("common.chanNamePrefix.cluster", "foo")
+
+	assert.Equal(t, "foo", params.CommonCfg.ClusterPrefix.GetValue())
 }

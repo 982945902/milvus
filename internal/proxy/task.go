@@ -32,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/indexpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/ctokenizer"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
@@ -43,17 +44,25 @@ import (
 )
 
 const (
+	SumScorer string = "sum"
+	MaxScorer string = "max"
+	AvgScorer string = "avg"
+)
+
+const (
 	IgnoreGrowingKey     = "ignore_growing"
 	ReduceStopForBestKey = "reduce_stop_for_best"
 	IteratorField        = "iterator"
 	GroupByFieldKey      = "group_by_field"
 	GroupSizeKey         = "group_size"
-	GroupStrictSize      = "group_strict_size"
+	StrictGroupSize      = "strict_group_size"
+	RankGroupScorer      = "rank_group_scorer"
 	AnnsFieldKey         = "anns_field"
 	TopKKey              = "topk"
 	NQKey                = "nq"
 	MetricTypeKey        = common.MetricTypeKey
 	SearchParamsKey      = "params"
+	ExprParamsKey        = "expr_params"
 	RoundDecimalKey      = "round_decimal"
 	OffsetKey            = "offset"
 	LimitKey             = "limit"
@@ -80,6 +89,7 @@ const (
 	DescribeAliasTaskName         = "DescribeAliasTask"
 	ListAliasesTaskName           = "ListAliasesTask"
 	AlterCollectionTaskName       = "AlterCollectionTask"
+	AlterCollectionFieldTaskName  = "AlterCollectionFieldTask"
 	UpsertTaskName                = "UpsertTask"
 	CreateResourceGroupTaskName   = "CreateResourceGroupTask"
 	UpdateResourceGroupsTaskName  = "UpdateResourceGroupsTask"
@@ -211,6 +221,10 @@ func (t *createCollectionTask) validatePartitionKey() error {
 				return errors.New("the partition key field must not be primary field")
 			}
 
+			if field.GetNullable() {
+				return merr.WrapErrParameterInvalidMsg("partition key field not support nullable")
+			}
+
 			// The type of the partition key field can only be int64 and varchar
 			if field.DataType != schemapb.DataType_Int64 && field.DataType != schemapb.DataType_VarChar {
 				return errors.New("the data type of partition key should be Int64 or VarChar")
@@ -292,6 +306,10 @@ func (t *createCollectionTask) PreExecute(ctx context.Context) error {
 		return err
 	}
 	t.schema.AutoID = false
+
+	if err := validateFunction(t.schema); err != nil {
+		return err
+	}
 
 	if t.ShardsNum > Params.ProxyCfg.MaxShardNum.GetAsInt32() {
 		return fmt.Errorf("maximum shards's number should be limited to %d", Params.ProxyCfg.MaxShardNum.GetAsInt())
@@ -387,6 +405,10 @@ func (t *createCollectionTask) PreExecute(ctx context.Context) error {
 		// TODO should remove the index params in the field schema
 		indexParams := funcutil.KeyValuePair2Map(field.GetIndexParams())
 		if err = ValidateAutoIndexMmapConfig(isVectorType, indexParams); err != nil {
+			return err
+		}
+
+		if err := ctokenizer.ValidateTextSchema(field, wasBm25FunctionInputField(t.schema, field)); err != nil {
 			return err
 		}
 	}
@@ -544,9 +566,19 @@ func (t *hasCollectionTask) PreExecute(ctx context.Context) error {
 }
 
 func (t *hasCollectionTask) Execute(ctx context.Context) error {
-	var err error
-	t.result, err = t.rootCoord.HasCollection(ctx, t.HasCollectionRequest)
-	return merr.CheckRPCCall(t.result, err)
+	t.result = &milvuspb.BoolResponse{
+		Status: merr.Success(),
+	}
+	_, err := globalMetaCache.GetCollectionID(ctx, t.HasCollectionRequest.GetDbName(), t.HasCollectionRequest.GetCollectionName())
+	// error other than
+	if err != nil && !errors.Is(err, merr.ErrCollectionNotFound) {
+		t.result.Status = merr.Status(err)
+		return err
+	}
+	// if collection not nil, means error is ErrCollectionNotFound, result is false
+	// otherwise, result is true
+	t.result.Value = (err == nil)
+	return nil
 }
 
 func (t *hasCollectionTask) PostExecute(ctx context.Context) error {
@@ -620,6 +652,7 @@ func (t *describeCollectionTask) Execute(ctx context.Context) error {
 			Description: "",
 			AutoID:      false,
 			Fields:      make([]*schemapb.FieldSchema, 0),
+			Functions:   make([]*schemapb.FunctionSchema, 0),
 		},
 		CollectionID:         0,
 		VirtualChannelNames:  nil,
@@ -669,22 +702,27 @@ func (t *describeCollectionTask) Execute(ctx context.Context) error {
 		}
 		if field.FieldID >= common.StartOfUserFieldID {
 			t.result.Schema.Fields = append(t.result.Schema.Fields, &schemapb.FieldSchema{
-				FieldID:         field.FieldID,
-				Name:            field.Name,
-				IsPrimaryKey:    field.IsPrimaryKey,
-				AutoID:          field.AutoID,
-				Description:     field.Description,
-				DataType:        field.DataType,
-				TypeParams:      field.TypeParams,
-				IndexParams:     field.IndexParams,
-				IsDynamic:       field.IsDynamic,
-				IsPartitionKey:  field.IsPartitionKey,
-				IsClusteringKey: field.IsClusteringKey,
-				DefaultValue:    field.DefaultValue,
-				ElementType:     field.ElementType,
-				Nullable:        field.Nullable,
+				FieldID:          field.FieldID,
+				Name:             field.Name,
+				IsPrimaryKey:     field.IsPrimaryKey,
+				AutoID:           field.AutoID,
+				Description:      field.Description,
+				DataType:         field.DataType,
+				TypeParams:       field.TypeParams,
+				IndexParams:      field.IndexParams,
+				IsDynamic:        field.IsDynamic,
+				IsPartitionKey:   field.IsPartitionKey,
+				IsClusteringKey:  field.IsClusteringKey,
+				DefaultValue:     field.DefaultValue,
+				ElementType:      field.ElementType,
+				Nullable:         field.Nullable,
+				IsFunctionOutput: field.IsFunctionOutput,
 			})
 		}
+	}
+
+	for _, function := range result.Schema.Functions {
+		t.result.Schema.Functions = append(t.result.Schema.Functions, proto.Clone(function).(*schemapb.FunctionSchema))
 	}
 	return nil
 }
@@ -916,6 +954,15 @@ func hasLazyLoadProp(props ...*commonpb.KeyValuePair) bool {
 	return false
 }
 
+func hasPropInDeletekeys(keys []string) string {
+	for _, key := range keys {
+		if key == common.MmapEnabledKey || key == common.LazyLoadEnableKey {
+			return key
+		}
+	}
+	return ""
+}
+
 func validatePartitionKeyIsolation(colName string, isPartitionKeyEnabled bool, props ...*commonpb.KeyValuePair) (bool, error) {
 	iso, err := common.IsPartitionKeyIsolationKvEnabled(props...)
 	if err != nil {
@@ -943,19 +990,37 @@ func validatePartitionKeyIsolation(colName string, isPartitionKeyEnabled bool, p
 }
 
 func (t *alterCollectionTask) PreExecute(ctx context.Context) error {
+	if len(t.GetProperties()) > 0 && len(t.GetDeleteKeys()) > 0 {
+		return merr.WrapErrParameterInvalidMsg("cannot provide both DeleteKeys and ExtraParams")
+	}
+
 	collectionID, err := globalMetaCache.GetCollectionID(ctx, t.GetDbName(), t.CollectionName)
 	if err != nil {
 		return err
 	}
 
 	t.CollectionID = collectionID
-	if hasMmapProp(t.Properties...) || hasLazyLoadProp(t.Properties...) {
-		loaded, err := isCollectionLoaded(ctx, t.queryCoord, t.CollectionID)
-		if err != nil {
-			return err
+
+	if len(t.GetProperties()) > 0 {
+		if hasMmapProp(t.Properties...) || hasLazyLoadProp(t.Properties...) {
+			loaded, err := isCollectionLoaded(ctx, t.queryCoord, t.CollectionID)
+			if err != nil {
+				return err
+			}
+			if loaded {
+				return merr.WrapErrCollectionLoaded(t.CollectionName, "can not alter mmap properties if collection loaded")
+			}
 		}
-		if loaded {
-			return merr.WrapErrCollectionLoaded(t.CollectionName, "can not alter mmap properties if collection loaded")
+	} else if len(t.GetDeleteKeys()) > 0 {
+		key := hasPropInDeletekeys(t.DeleteKeys)
+		if key != "" {
+			loaded, err := isCollectionLoaded(ctx, t.queryCoord, t.CollectionID)
+			if err != nil {
+				return err
+			}
+			if loaded {
+				return merr.WrapErrCollectionLoaded(" %s %s can not delete mmap properties if collection loaded", t.CollectionName, key)
+			}
 		}
 	}
 
@@ -1028,13 +1093,99 @@ func (t *alterCollectionTask) PostExecute(ctx context.Context) error {
 	return nil
 }
 
+type alterCollectionFieldTask struct {
+	baseTask
+	Condition
+	*milvuspb.AlterCollectionFieldRequest
+	ctx        context.Context
+	rootCoord  types.RootCoordClient
+	result     *commonpb.Status
+	queryCoord types.QueryCoordClient
+	dataCoord  types.DataCoordClient
+}
+
+func (t *alterCollectionFieldTask) TraceCtx() context.Context {
+	return t.ctx
+}
+
+func (t *alterCollectionFieldTask) ID() UniqueID {
+	return t.Base.MsgID
+}
+
+func (t *alterCollectionFieldTask) SetID(uid UniqueID) {
+	t.Base.MsgID = uid
+}
+
+func (t *alterCollectionFieldTask) Name() string {
+	return AlterCollectionTaskName
+}
+
+func (t *alterCollectionFieldTask) Type() commonpb.MsgType {
+	return t.Base.MsgType
+}
+
+func (t *alterCollectionFieldTask) BeginTs() Timestamp {
+	return t.Base.Timestamp
+}
+
+func (t *alterCollectionFieldTask) EndTs() Timestamp {
+	return t.Base.Timestamp
+}
+
+func (t *alterCollectionFieldTask) SetTs(ts Timestamp) {
+	t.Base.Timestamp = ts
+}
+
+func (t *alterCollectionFieldTask) OnEnqueue() error {
+	if t.Base == nil {
+		t.Base = commonpbutil.NewMsgBase()
+	}
+	t.Base.MsgType = commonpb.MsgType_AlterCollectionField
+	t.Base.SourceID = paramtable.GetNodeID()
+	return nil
+}
+
+func (t *alterCollectionFieldTask) PreExecute(ctx context.Context) error {
+	collSchema, err := globalMetaCache.GetCollectionSchema(ctx, t.GetDbName(), t.CollectionName)
+	if err != nil {
+		return err
+	}
+
+	IsStringType := false
+	fieldName := ""
+	var dataType int32
+	for _, field := range collSchema.Fields {
+		if field.GetName() == t.FieldName && (typeutil.IsStringType(field.DataType) || typeutil.IsArrayContainStringElementType(field.DataType, field.ElementType)) {
+			IsStringType = true
+			fieldName = field.GetName()
+			dataType = int32(field.DataType)
+		}
+	}
+	if !IsStringType {
+		return merr.WrapErrParameterInvalid(fieldName, "%s can not modify the maxlength for non-string types", schemapb.DataType_name[dataType])
+	}
+
+	return nil
+}
+
+func (t *alterCollectionFieldTask) Execute(ctx context.Context) error {
+	var err error
+	t.result, err = t.rootCoord.AlterCollectionField(ctx, t.AlterCollectionFieldRequest)
+	return merr.CheckRPCCall(t.result, err)
+}
+
+func (t *alterCollectionFieldTask) PostExecute(ctx context.Context) error {
+	return nil
+}
+
 type createPartitionTask struct {
 	baseTask
 	Condition
 	*milvuspb.CreatePartitionRequest
-	ctx       context.Context
-	rootCoord types.RootCoordClient
-	result    *commonpb.Status
+	ctx        context.Context
+	rootCoord  types.RootCoordClient
+	queryCoord types.QueryCoordClient
+	result     *commonpb.Status
 }
 
 func (t *createPartitionTask) TraceCtx() context.Context {
@@ -1102,6 +1253,24 @@ func (t *createPartitionTask) PreExecute(ctx context.Context) error {
 
 func (t *createPartitionTask) Execute(ctx context.Context) (err error) {
 	t.result, err = t.rootCoord.CreatePartition(ctx, t.CreatePartitionRequest)
+	if err := merr.CheckRPCCall(t.result, err); err != nil {
+		return err
+	}
+	collectionID, err := globalMetaCache.GetCollectionID(ctx, t.GetDbName(), t.GetCollectionName())
+	if err != nil {
+		t.result = merr.Status(err)
+		return err
+	}
+	partitionID, err := globalMetaCache.GetPartitionID(ctx, t.GetDbName(), t.GetCollectionName(), t.GetPartitionName())
+	if err != nil {
+		t.result = merr.Status(err)
+		return err
+	}
+	t.result, err = t.queryCoord.SyncNewCreatedPartition(ctx, &querypb.SyncNewCreatedPartitionRequest{
+		Base:         commonpbutil.NewMsgBase(commonpbutil.WithMsgType(commonpb.MsgType_ReleasePartitions)),
+		CollectionID: collectionID,
+		PartitionID:  partitionID,
+	})
 	return merr.CheckRPCCall(t.result, err)
 }
 
@@ -1522,7 +1691,6 @@ func (t *loadCollectionTask) Execute(ctx context.Context) (err error) {
 		return err
 	}
 	// prepare load field list
-	// TODO use load collection load field list after proto merged
 	loadFields, err := collSchema.GetLoadFieldIDs(t.GetLoadFields(), t.GetSkipLoadDynamicField())
 	if err != nil {
 		return err
@@ -1549,9 +1717,10 @@ func (t *loadCollectionTask) Execute(ctx context.Context) (err error) {
 		fieldIndexIDs[index.FieldID] = index.IndexID
 	}
 
+	loadFieldsSet := typeutil.NewSet(loadFields...)
 	unindexedVecFields := make([]string, 0)
 	for _, field := range collSchema.GetFields() {
-		if typeutil.IsVectorType(field.GetDataType()) {
+		if typeutil.IsVectorType(field.GetDataType()) && loadFieldsSet.Contain(field.GetFieldID()) {
 			if _, ok := fieldIndexIDs[field.GetFieldID()]; !ok {
 				unindexedVecFields = append(unindexedVecFields, field.GetName())
 			}
@@ -1686,7 +1855,6 @@ func (t *releaseCollectionTask) Execute(ctx context.Context) (err error) {
 }
 
 func (t *releaseCollectionTask) PostExecute(ctx context.Context) error {
-	globalMetaCache.DeprecateShardCache(t.GetDbName(), t.CollectionName)
 	return nil
 }
 
@@ -1793,21 +1961,28 @@ func (t *loadPartitionsTask) Execute(ctx context.Context) error {
 		return err
 	}
 
-	hasVecIndex := false
+	// not support multiple indexes on one field
 	fieldIndexIDs := make(map[int64]int64)
 	for _, index := range indexResponse.IndexInfos {
 		fieldIndexIDs[index.FieldID] = index.IndexID
-		for _, field := range collSchema.Fields {
-			if index.FieldID == field.FieldID && typeutil.IsVectorType(field.DataType) {
-				hasVecIndex = true
+	}
+
+	loadFieldsSet := typeutil.NewSet(loadFields...)
+	unindexedVecFields := make([]string, 0)
+	for _, field := range collSchema.GetFields() {
+		if typeutil.IsVectorType(field.GetDataType()) && loadFieldsSet.Contain(field.GetFieldID()) {
+			if _, ok := fieldIndexIDs[field.GetFieldID()]; !ok {
+				unindexedVecFields = append(unindexedVecFields, field.GetName())
 			}
 		}
 	}
-	if !hasVecIndex {
-		errMsg := fmt.Sprintf("there is no vector index on collection: %s, please create index firstly", t.LoadPartitionsRequest.CollectionName)
-		log.Ctx(ctx).Error(errMsg)
+
+	if len(unindexedVecFields) != 0 {
+		errMsg := fmt.Sprintf("there is no vector index on field: %v, please create index firstly", unindexedVecFields)
+		log.Debug(errMsg)
 		return errors.New(errMsg)
 	}
+
 	for _, partitionName := range t.PartitionNames {
 		partitionID, err := globalMetaCache.GetPartitionID(ctx, t.GetDbName(), t.CollectionName, partitionName)
 		if err != nil {
@@ -1949,7 +2124,6 @@ func (t *releasePartitionsTask) Execute(ctx context.Context) (err error) {
 }
 
 func (t *releasePartitionsTask) PostExecute(ctx context.Context) error {
-	globalMetaCache.DeprecateShardCache(t.GetDbName(), t.CollectionName)
 	return nil
 }
 

@@ -25,6 +25,7 @@ import (
 	"github.com/samber/lo"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
@@ -69,7 +70,7 @@ func (s *Server) ShowCollections(ctx context.Context, req *querypb.ShowCollectio
 	isGetAll := false
 	collectionSet := typeutil.NewUniqueSet(req.GetCollectionIDs()...)
 	if len(req.GetCollectionIDs()) == 0 {
-		for _, collection := range s.meta.GetAllCollections() {
+		for _, collection := range s.meta.GetAllCollections(ctx) {
 			collectionSet.Insert(collection.GetCollectionID())
 		}
 		isGetAll = true
@@ -85,9 +86,9 @@ func (s *Server) ShowCollections(ctx context.Context, req *querypb.ShowCollectio
 	for _, collectionID := range collections {
 		log := log.With(zap.Int64("collectionID", collectionID))
 
-		collection := s.meta.CollectionManager.GetCollection(collectionID)
-		percentage := s.meta.CollectionManager.CalculateLoadPercentage(collectionID)
-		loadFields := s.meta.CollectionManager.GetLoadFields(collectionID)
+		collection := s.meta.CollectionManager.GetCollection(ctx, collectionID)
+		percentage := s.meta.CollectionManager.CalculateLoadPercentage(ctx, collectionID)
+		loadFields := s.meta.CollectionManager.GetLoadFields(ctx, collectionID)
 		refreshProgress := int64(0)
 		if percentage < 0 {
 			if isGetAll {
@@ -149,12 +150,13 @@ func (s *Server) ShowPartitions(ctx context.Context, req *querypb.ShowPartitions
 	refreshProgress := int64(0)
 
 	if len(partitions) == 0 {
-		partitions = lo.Map(s.meta.GetPartitionsByCollection(req.GetCollectionID()), func(partition *meta.Partition, _ int) int64 {
+		partitions = lo.Map(s.meta.GetPartitionsByCollection(ctx, req.GetCollectionID()), func(partition *meta.Partition, _ int) int64 {
 			return partition.GetPartitionID()
 		})
 	}
+
 	for _, partitionID := range partitions {
-		percentage := s.meta.GetPartitionLoadPercentage(partitionID)
+		percentage := s.meta.GetPartitionLoadPercentage(ctx, partitionID)
 		if percentage < 0 {
 			err := meta.GlobalFailedLoadCache.Get(req.GetCollectionID())
 			if err != nil {
@@ -171,10 +173,11 @@ func (s *Server) ShowPartitions(ctx context.Context, req *querypb.ShowPartitions
 				Status: merr.Status(err),
 			}, nil
 		}
+
 		percentages = append(percentages, int64(percentage))
 	}
 
-	collection := s.meta.GetCollection(req.GetCollectionID())
+	collection := s.meta.GetCollection(ctx, req.GetCollectionID())
 	if collection != nil && collection.IsRefreshed() {
 		refreshProgress = 100
 	}
@@ -214,7 +217,7 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 
 	// If refresh mode is ON.
 	if req.GetRefresh() {
-		err := s.refreshCollection(req.GetCollectionID())
+		err := s.refreshCollection(ctx, req.GetCollectionID())
 		if err != nil {
 			log.Warn("failed to refresh collection", zap.Error(err))
 		}
@@ -239,24 +242,58 @@ func (s *Server) LoadCollection(ctx context.Context, req *querypb.LoadCollection
 		}
 	}
 
-	if err := s.checkResourceGroup(req.GetCollectionID(), req.GetResourceGroups()); err != nil {
-		msg := "failed to load collection"
-		log.Warn(msg, zap.Error(err))
-		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
-		return merr.Status(errors.Wrap(err, msg)), nil
+	if req.GetReplicaNumber() <= 0 {
+		log.Info("request doesn't indicate the number of replicas, set it to 1")
+		req.ReplicaNumber = 1
 	}
 
-	loadJob := job.NewLoadCollectionJob(ctx,
-		req,
-		s.dist,
-		s.meta,
-		s.broker,
-		s.cluster,
-		s.targetMgr,
-		s.targetObserver,
-		s.collectionObserver,
-		s.nodeMgr,
-	)
+	if len(req.GetResourceGroups()) == 0 {
+		log.Info(fmt.Sprintf("request doesn't indicate the resource groups, set it to %s", meta.DefaultResourceGroupName))
+		req.ResourceGroups = []string{meta.DefaultResourceGroupName}
+	}
+
+	var loadJob job.Job
+	collection := s.meta.GetCollection(ctx, req.GetCollectionID())
+	if collection != nil && collection.GetStatus() == querypb.LoadStatus_Loaded {
+		// if collection is loaded, check if collection is loaded with the same replica number and resource groups
+		// if replica number or resource group changes， switch to update load config
+		collectionUsedRG := s.meta.ReplicaManager.GetResourceGroupByCollection(ctx, collection.GetCollectionID()).Collect()
+		left, right := lo.Difference(collectionUsedRG, req.GetResourceGroups())
+		rgChanged := len(left) > 0 || len(right) > 0
+		replicaChanged := collection.GetReplicaNumber() != req.GetReplicaNumber()
+		if replicaChanged || rgChanged {
+			log.Warn("collection is loaded with different replica number or resource group, switch to update load config",
+				zap.Int32("oldReplicaNumber", collection.GetReplicaNumber()),
+				zap.Strings("oldResourceGroups", collectionUsedRG))
+			updateReq := &querypb.UpdateLoadConfigRequest{
+				CollectionIDs:  []int64{req.GetCollectionID()},
+				ReplicaNumber:  req.GetReplicaNumber(),
+				ResourceGroups: req.GetResourceGroups(),
+			}
+			loadJob = job.NewUpdateLoadConfigJob(
+				ctx,
+				updateReq,
+				s.meta,
+				s.targetMgr,
+				s.targetObserver,
+				s.collectionObserver,
+			)
+		}
+	}
+
+	if loadJob == nil {
+		loadJob = job.NewLoadCollectionJob(ctx,
+			req,
+			s.dist,
+			s.meta,
+			s.broker,
+			s.targetMgr,
+			s.targetObserver,
+			s.collectionObserver,
+			s.nodeMgr,
+		)
+	}
+
 	s.jobScheduler.Add(loadJob)
 	err := loadJob.Wait()
 	if err != nil {
@@ -290,10 +327,10 @@ func (s *Server) ReleaseCollection(ctx context.Context, req *querypb.ReleaseColl
 		s.dist,
 		s.meta,
 		s.broker,
-		s.cluster,
 		s.targetMgr,
 		s.targetObserver,
 		s.checkerController,
+		s.proxyClientManager,
 	)
 	s.jobScheduler.Add(releaseJob)
 	err := releaseJob.Wait()
@@ -333,7 +370,7 @@ func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitions
 
 	// If refresh mode is ON.
 	if req.GetRefresh() {
-		err := s.refreshCollection(req.GetCollectionID())
+		err := s.refreshCollection(ctx, req.GetCollectionID())
 		if err != nil {
 			log.Warn("failed to refresh partitions", zap.Error(err))
 		}
@@ -360,19 +397,11 @@ func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitions
 		}
 	}
 
-	if err := s.checkResourceGroup(req.GetCollectionID(), req.GetResourceGroups()); err != nil {
-		msg := "failed to load partitions"
-		log.Warn(msg, zap.Error(err))
-		metrics.QueryCoordLoadCount.WithLabelValues(metrics.FailLabel).Inc()
-		return merr.Status(errors.Wrap(err, msg)), nil
-	}
-
 	loadJob := job.NewLoadPartitionJob(ctx,
 		req,
 		s.dist,
 		s.meta,
 		s.broker,
-		s.cluster,
 		s.targetMgr,
 		s.targetObserver,
 		s.collectionObserver,
@@ -389,23 +418,6 @@ func (s *Server) LoadPartitions(ctx context.Context, req *querypb.LoadPartitions
 
 	metrics.QueryCoordLoadCount.WithLabelValues(metrics.SuccessLabel).Inc()
 	return merr.Success(), nil
-}
-
-func (s *Server) checkResourceGroup(collectionID int64, resourceGroups []string) error {
-	if len(resourceGroups) != 0 {
-		collectionUsedRG := s.meta.ReplicaManager.GetResourceGroupByCollection(collectionID)
-		for _, rgName := range resourceGroups {
-			if len(collectionUsedRG) > 0 && !collectionUsedRG.Contain(rgName) {
-				return merr.WrapErrParameterInvalid("created resource group(s)", rgName, "given resource group not found")
-			}
-
-			if len(resourceGroups) > 1 && rgName == meta.DefaultResourceGroupName {
-				return merr.WrapErrParameterInvalid("no default resource group mixed with the other resource group(s)", rgName)
-			}
-		}
-	}
-
-	return nil
 }
 
 func (s *Server) ReleasePartitions(ctx context.Context, req *querypb.ReleasePartitionsRequest) (*commonpb.Status, error) {
@@ -436,10 +448,10 @@ func (s *Server) ReleasePartitions(ctx context.Context, req *querypb.ReleasePart
 		s.dist,
 		s.meta,
 		s.broker,
-		s.cluster,
 		s.targetMgr,
 		s.targetObserver,
 		s.checkerController,
+		s.proxyClientManager,
 	)
 	s.jobScheduler.Add(releaseJob)
 	err := releaseJob.Wait()
@@ -478,9 +490,9 @@ func (s *Server) GetPartitionStates(ctx context.Context, req *querypb.GetPartiti
 	}
 
 	states := make([]*querypb.PartitionStates, 0, len(req.GetPartitionIDs()))
-	switch s.meta.GetLoadType(req.GetCollectionID()) {
+	switch s.meta.GetLoadType(ctx, req.GetCollectionID()) {
 	case querypb.LoadType_LoadCollection:
-		collection := s.meta.GetCollection(req.GetCollectionID())
+		collection := s.meta.GetCollection(ctx, req.GetCollectionID())
 		state := querypb.PartitionState_PartialInMemory
 		if collection.LoadPercentage >= 100 {
 			state = querypb.PartitionState_InMemory
@@ -499,7 +511,7 @@ func (s *Server) GetPartitionStates(ctx context.Context, req *querypb.GetPartiti
 
 	case querypb.LoadType_LoadPartition:
 		for _, partitionID := range req.GetPartitionIDs() {
-			partition := s.meta.GetPartition(partitionID)
+			partition := s.meta.GetPartition(ctx, partitionID)
 			if partition == nil {
 				log.Warn(msg, zap.Int64("partition", partitionID))
 				return notLoadResp, nil
@@ -542,7 +554,7 @@ func (s *Server) GetSegmentInfo(ctx context.Context, req *querypb.GetSegmentInfo
 
 	infos := make([]*querypb.SegmentInfo, 0, len(req.GetSegmentIDs()))
 	if len(req.GetSegmentIDs()) == 0 {
-		infos = s.getCollectionSegmentInfo(req.GetCollectionID())
+		infos = s.getCollectionSegmentInfo(ctx, req.GetCollectionID())
 	} else {
 		for _, segmentID := range req.GetSegmentIDs() {
 			segments := s.dist.SegmentDistManager.GetByFilter(meta.WithSegmentID(segmentID))
@@ -580,7 +592,7 @@ func (s *Server) SyncNewCreatedPartition(ctx context.Context, req *querypb.SyncN
 		return merr.Status(err), nil
 	}
 
-	syncJob := job.NewSyncNewCreatedPartitionJob(ctx, req, s.meta, s.cluster, s.broker)
+	syncJob := job.NewSyncNewCreatedPartitionJob(ctx, req, s.meta, s.broker, s.targetObserver, s.targetMgr)
 	s.jobScheduler.Add(syncJob)
 	err := syncJob.Wait()
 	if err != nil {
@@ -595,8 +607,8 @@ func (s *Server) SyncNewCreatedPartition(ctx context.Context, req *querypb.SyncN
 // tries to load them up. It returns when all segments of the given collection are loaded, or when error happens.
 // Note that a collection's loading progress always stays at 100% after a successful load and will not get updated
 // during refreshCollection.
-func (s *Server) refreshCollection(collectionID int64) error {
-	collection := s.meta.CollectionManager.GetCollection(collectionID)
+func (s *Server) refreshCollection(ctx context.Context, collectionID int64) error {
+	collection := s.meta.CollectionManager.GetCollection(ctx, collectionID)
 	if collection == nil {
 		return merr.WrapErrCollectionNotLoaded(collectionID)
 	}
@@ -708,14 +720,14 @@ func (s *Server) LoadBalance(ctx context.Context, req *querypb.LoadBalanceReques
 		log.Warn(msg, zap.Int("source-nodes-num", len(req.GetSourceNodeIDs())))
 		return merr.Status(err), nil
 	}
-	if s.meta.CollectionManager.CalculateLoadPercentage(req.GetCollectionID()) < 100 {
+	if s.meta.CollectionManager.CalculateLoadPercentage(ctx, req.GetCollectionID()) < 100 {
 		err := merr.WrapErrCollectionNotFullyLoaded(req.GetCollectionID())
 		msg := "can't balance segments of not fully loaded collection"
 		log.Warn(msg)
 		return merr.Status(err), nil
 	}
 	srcNode := req.GetSourceNodeIDs()[0]
-	replica := s.meta.ReplicaManager.GetByCollectionAndNode(req.GetCollectionID(), srcNode)
+	replica := s.meta.ReplicaManager.GetByCollectionAndNode(ctx, req.GetCollectionID(), srcNode)
 	if replica == nil {
 		err := merr.WrapErrNodeNotFound(srcNode, fmt.Sprintf("source node not found in any replica of collection %d", req.GetCollectionID()))
 		msg := "source node not found in any replica"
@@ -769,7 +781,7 @@ func (s *Server) LoadBalance(ctx context.Context, req *querypb.LoadBalanceReques
 			}
 
 			// Only balance segments in targets
-			existInTarget := s.targetMgr.GetSealedSegment(segment.GetCollectionID(), segment.GetID(), meta.CurrentTarget) != nil
+			existInTarget := s.targetMgr.GetSealedSegment(ctx, segment.GetCollectionID(), segment.GetID(), meta.CurrentTarget) != nil
 			if !existInTarget {
 				log.Info("segment doesn't exist in current target, skip it", zap.Int64("segmentID", segmentID))
 				continue
@@ -835,30 +847,13 @@ func (s *Server) GetMetrics(ctx context.Context, req *milvuspb.GetMetricsRequest
 			paramtable.GetNodeID()),
 	}
 
-	metricType, err := metricsinfo.ParseMetricType(req.GetRequest())
+	ret, err := s.metricsRequest.ExecuteMetricsRequest(ctx, req)
 	if err != nil {
-		msg := "failed to parse metric type"
-		log.Warn(msg, zap.Error(err))
-		resp.Status = merr.Status(errors.Wrap(err, msg))
+		resp.Status = merr.Status(err)
 		return resp, nil
 	}
 
-	if metricType != metricsinfo.SystemInfoMetrics {
-		msg := "invalid metric type"
-		err := errors.New(metricsinfo.MsgUnimplementedMetric)
-		log.Warn(msg, zap.Error(err))
-		resp.Status = merr.Status(errors.Wrap(err, msg))
-		return resp, nil
-	}
-
-	resp.Response, err = s.getSystemInfoMetrics(ctx, req)
-	if err != nil {
-		msg := "failed to get system info metrics"
-		log.Warn(msg, zap.Error(err))
-		resp.Status = merr.Status(errors.Wrap(err, msg))
-		return resp, nil
-	}
-
+	resp.Response = ret
 	return resp, nil
 }
 
@@ -882,13 +877,13 @@ func (s *Server) GetReplicas(ctx context.Context, req *milvuspb.GetReplicasReque
 		Replicas: make([]*milvuspb.ReplicaInfo, 0),
 	}
 
-	replicas := s.meta.ReplicaManager.GetByCollection(req.GetCollectionID())
+	replicas := s.meta.ReplicaManager.GetByCollection(ctx, req.GetCollectionID())
 	if len(replicas) == 0 {
 		return resp, nil
 	}
 
 	for _, replica := range replicas {
-		resp.Replicas = append(resp.Replicas, s.fillReplicaInfo(replica, req.GetWithShardNodes()))
+		resp.Replicas = append(resp.Replicas, s.fillReplicaInfo(ctx, replica, req.GetWithShardNodes()))
 	}
 	return resp, nil
 }
@@ -907,7 +902,7 @@ func (s *Server) GetShardLeaders(ctx context.Context, req *querypb.GetShardLeade
 		}, nil
 	}
 
-	leaders, err := utils.GetShardLeaders(s.meta, s.targetMgr, s.dist, s.nodeMgr, req.GetCollectionID())
+	leaders, err := utils.GetShardLeaders(ctx, s.meta, s.targetMgr, s.dist, s.nodeMgr, req.GetCollectionID())
 	return &querypb.GetShardLeadersResponse{
 		Status: merr.Status(err),
 		Shards: leaders,
@@ -924,8 +919,8 @@ func (s *Server) CheckHealth(ctx context.Context, req *milvuspb.CheckHealthReque
 		return componentutil.CheckHealthRespWithErrMsg(errReasons...), nil
 	}
 
-	if err := utils.CheckCollectionsQueryable(s.meta, s.targetMgr, s.dist, s.nodeMgr); err != nil {
-		return componentutil.CheckHealthRespWithErr(err), nil
+	if err := utils.CheckCollectionsQueryable(ctx, s.meta, s.targetMgr, s.dist, s.nodeMgr); err != nil {
+		log.Warn("some collection is not queryable during health check", zap.Error(err))
 	}
 
 	return componentutil.CheckHealthRespWithErr(nil), nil
@@ -970,7 +965,7 @@ func (s *Server) CreateResourceGroup(ctx context.Context, req *milvuspb.CreateRe
 		return merr.Status(err), nil
 	}
 
-	err := s.meta.ResourceManager.AddResourceGroup(req.GetResourceGroup(), req.GetConfig())
+	err := s.meta.ResourceManager.AddResourceGroup(ctx, req.GetResourceGroup(), req.GetConfig())
 	if err != nil {
 		log.Warn("failed to create resource group", zap.Error(err))
 		return merr.Status(err), nil
@@ -989,7 +984,7 @@ func (s *Server) UpdateResourceGroups(ctx context.Context, req *querypb.UpdateRe
 		return merr.Status(err), nil
 	}
 
-	err := s.meta.ResourceManager.UpdateResourceGroups(req.GetResourceGroups())
+	err := s.meta.ResourceManager.UpdateResourceGroups(ctx, req.GetResourceGroups())
 	if err != nil {
 		log.Warn("failed to update resource group", zap.Error(err))
 		return merr.Status(err), nil
@@ -1008,14 +1003,14 @@ func (s *Server) DropResourceGroup(ctx context.Context, req *milvuspb.DropResour
 		return merr.Status(err), nil
 	}
 
-	replicas := s.meta.ReplicaManager.GetByResourceGroup(req.GetResourceGroup())
+	replicas := s.meta.ReplicaManager.GetByResourceGroup(ctx, req.GetResourceGroup())
 	if len(replicas) > 0 {
 		err := merr.WrapErrParameterInvalid("empty resource group", fmt.Sprintf("resource group %s has collection %d loaded", req.GetResourceGroup(), replicas[0].GetCollectionID()))
 		return merr.Status(errors.Wrap(err,
 			fmt.Sprintf("some replicas still loaded in resource group[%s], release it first", req.GetResourceGroup()))), nil
 	}
 
-	err := s.meta.ResourceManager.RemoveResourceGroup(req.GetResourceGroup())
+	err := s.meta.ResourceManager.RemoveResourceGroup(ctx, req.GetResourceGroup())
 	if err != nil {
 		log.Warn("failed to drop resource group", zap.Error(err))
 		return merr.Status(err), nil
@@ -1038,7 +1033,7 @@ func (s *Server) TransferNode(ctx context.Context, req *milvuspb.TransferNodeReq
 	}
 
 	// Move node from source resource group to target resource group.
-	if err := s.meta.ResourceManager.TransferNode(req.GetSourceResourceGroup(), req.GetTargetResourceGroup(), int(req.GetNumNode())); err != nil {
+	if err := s.meta.ResourceManager.TransferNode(ctx, req.GetSourceResourceGroup(), req.GetTargetResourceGroup(), int(req.GetNumNode())); err != nil {
 		log.Warn("failed to transfer node", zap.Error(err))
 		return merr.Status(err), nil
 	}
@@ -1060,20 +1055,20 @@ func (s *Server) TransferReplica(ctx context.Context, req *querypb.TransferRepli
 	}
 
 	// TODO: !!!WARNING, replica manager and resource manager doesn't protected with each other by lock.
-	if ok := s.meta.ResourceManager.ContainResourceGroup(req.GetSourceResourceGroup()); !ok {
+	if ok := s.meta.ResourceManager.ContainResourceGroup(ctx, req.GetSourceResourceGroup()); !ok {
 		err := merr.WrapErrResourceGroupNotFound(req.GetSourceResourceGroup())
 		return merr.Status(errors.Wrap(err,
 			fmt.Sprintf("the source resource group[%s] doesn't exist", req.GetSourceResourceGroup()))), nil
 	}
 
-	if ok := s.meta.ResourceManager.ContainResourceGroup(req.GetTargetResourceGroup()); !ok {
+	if ok := s.meta.ResourceManager.ContainResourceGroup(ctx, req.GetTargetResourceGroup()); !ok {
 		err := merr.WrapErrResourceGroupNotFound(req.GetTargetResourceGroup())
 		return merr.Status(errors.Wrap(err,
 			fmt.Sprintf("the target resource group[%s] doesn't exist", req.GetTargetResourceGroup()))), nil
 	}
 
 	// Apply change into replica manager.
-	err := s.meta.TransferReplica(req.GetCollectionID(), req.GetSourceResourceGroup(), req.GetTargetResourceGroup(), int(req.GetNumReplica()))
+	err := s.meta.TransferReplica(ctx, req.GetCollectionID(), req.GetSourceResourceGroup(), req.GetTargetResourceGroup(), int(req.GetNumReplica()))
 	return merr.Status(err), nil
 }
 
@@ -1090,7 +1085,7 @@ func (s *Server) ListResourceGroups(ctx context.Context, req *milvuspb.ListResou
 		return resp, nil
 	}
 
-	resp.ResourceGroups = s.meta.ResourceManager.ListResourceGroups()
+	resp.ResourceGroups = s.meta.ResourceManager.ListResourceGroups(ctx)
 	return resp, nil
 }
 
@@ -1109,7 +1104,7 @@ func (s *Server) DescribeResourceGroup(ctx context.Context, req *querypb.Describ
 		return resp, nil
 	}
 
-	rg := s.meta.ResourceManager.GetResourceGroup(req.GetResourceGroup())
+	rg := s.meta.ResourceManager.GetResourceGroup(ctx, req.GetResourceGroup())
 	if rg == nil {
 		err := merr.WrapErrResourceGroupNotFound(req.GetResourceGroup())
 		resp.Status = merr.Status(err)
@@ -1118,26 +1113,26 @@ func (s *Server) DescribeResourceGroup(ctx context.Context, req *querypb.Describ
 
 	loadedReplicas := make(map[int64]int32)
 	outgoingNodes := make(map[int64]int32)
-	replicasInRG := s.meta.GetByResourceGroup(req.GetResourceGroup())
+	replicasInRG := s.meta.GetByResourceGroup(ctx, req.GetResourceGroup())
 	for _, replica := range replicasInRG {
 		loadedReplicas[replica.GetCollectionID()]++
 		for _, node := range replica.GetRONodes() {
-			if !s.meta.ContainsNode(replica.GetResourceGroup(), node) {
+			if !s.meta.ContainsNode(ctx, replica.GetResourceGroup(), node) {
 				outgoingNodes[replica.GetCollectionID()]++
 			}
 		}
 	}
 	incomingNodes := make(map[int64]int32)
-	collections := s.meta.GetAll()
+	collections := s.meta.GetAll(ctx)
 	for _, collection := range collections {
-		replicas := s.meta.GetByCollection(collection)
+		replicas := s.meta.GetByCollection(ctx, collection)
 
 		for _, replica := range replicas {
 			if replica.GetResourceGroup() == req.GetResourceGroup() {
 				continue
 			}
 			for _, node := range replica.GetRONodes() {
-				if s.meta.ContainsNode(req.GetResourceGroup(), node) {
+				if s.meta.ContainsNode(ctx, req.GetResourceGroup(), node) {
 					incomingNodes[collection]++
 				}
 			}
@@ -1167,4 +1162,80 @@ func (s *Server) DescribeResourceGroup(ctx context.Context, req *querypb.Describ
 		Nodes:            nodes,
 	}
 	return resp, nil
+}
+
+func (s *Server) UpdateLoadConfig(ctx context.Context, req *querypb.UpdateLoadConfigRequest) (*commonpb.Status, error) {
+	log := log.Ctx(ctx).With(
+		zap.Int64s("collectionIDs", req.GetCollectionIDs()),
+		zap.Int32("replicaNumber", req.GetReplicaNumber()),
+		zap.Strings("resourceGroups", req.GetResourceGroups()),
+	)
+
+	log.Info("update load config request received")
+	if err := merr.CheckHealthy(s.State()); err != nil {
+		msg := "failed to update load config"
+		log.Warn(msg, zap.Error(err))
+		return merr.Status(errors.Wrap(err, msg)), nil
+	}
+
+	jobs := make([]job.Job, 0, len(req.GetCollectionIDs()))
+	for _, collectionID := range req.GetCollectionIDs() {
+		collection := s.meta.GetCollection(ctx, collectionID)
+		if collection == nil || collection.GetStatus() != querypb.LoadStatus_Loaded {
+			err := merr.WrapErrCollectionNotLoaded(collectionID)
+			log.Warn("failed to update load config", zap.Error(err))
+			continue
+		}
+
+		collectionUsedRG := s.meta.ReplicaManager.GetResourceGroupByCollection(ctx, collection.GetCollectionID()).Collect()
+		left, right := lo.Difference(collectionUsedRG, req.GetResourceGroups())
+		rgChanged := len(left) > 0 || len(right) > 0
+		replicaChanged := collection.GetReplicaNumber() != req.GetReplicaNumber()
+
+		subReq := proto.Clone(req).(*querypb.UpdateLoadConfigRequest)
+		subReq.CollectionIDs = []int64{collectionID}
+		if len(req.ResourceGroups) == 0 {
+			subReq.ResourceGroups = collectionUsedRG
+			rgChanged = false
+		}
+
+		if subReq.GetReplicaNumber() == 0 {
+			subReq.ReplicaNumber = collection.GetReplicaNumber()
+			replicaChanged = false
+		}
+
+		if !replicaChanged && !rgChanged {
+			log.Info("no need to update load config", zap.Int64("collectionID", collectionID))
+			continue
+		}
+
+		updateJob := job.NewUpdateLoadConfigJob(
+			ctx,
+			subReq,
+			s.meta,
+			s.targetMgr,
+			s.targetObserver,
+			s.collectionObserver,
+		)
+
+		jobs = append(jobs, updateJob)
+		s.jobScheduler.Add(updateJob)
+	}
+
+	var err error
+	for _, job := range jobs {
+		subErr := job.Wait()
+		if subErr != nil {
+			err = merr.Combine(err, subErr)
+		}
+	}
+
+	if err != nil {
+		msg := "failed to update load config"
+		log.Warn(msg, zap.Error(err))
+		return merr.Status(errors.Wrap(err, msg)), nil
+	}
+	log.Info("update load config request finished")
+
+	return merr.Success(), nil
 }

@@ -29,11 +29,12 @@ import (
 	"github.com/milvus-io/milvus/internal/querycoordv2/params"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments/metricsutil"
 	"github.com/milvus-io/milvus/internal/storage"
+	"github.com/milvus-io/milvus/internal/util/indexparamcheck"
+	"github.com/milvus-io/milvus/internal/util/vecindexmgr"
 	"github.com/milvus-io/milvus/pkg/common"
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 	"github.com/milvus-io/milvus/pkg/util/contextutil"
-	"github.com/milvus-io/milvus/pkg/util/indexparamcheck"
 	"github.com/milvus-io/milvus/pkg/util/merr"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
@@ -182,8 +183,12 @@ func mergeRequestCost(requestCosts []*internalpb.CostAggregation) *internalpb.Co
 }
 
 func getIndexEngineVersion() (minimal, current int32) {
-	cMinimal, cCurrent := C.GetMinimalIndexVersion(), C.GetCurrentIndexVersion()
-	return int32(cMinimal), int32(cCurrent)
+	GetDynamicPool().Submit(func() (any, error) {
+		cMinimal, cCurrent := C.GetMinimalIndexVersion(), C.GetCurrentIndexVersion()
+		minimal, current = int32(cMinimal), int32(cCurrent)
+		return nil, nil
+	}).Await()
+	return minimal, current
 }
 
 // getSegmentMetricLabel returns the label for segment metrics.
@@ -265,7 +270,7 @@ func isIndexMmapEnable(fieldSchema *schemapb.FieldSchema, indexInfo *querypb.Fie
 	var indexSupportMmap bool
 	var defaultEnableMmap bool
 	if typeutil.IsVectorType(fieldSchema.GetDataType()) {
-		indexSupportMmap = indexparamcheck.IsVectorMmapIndex(indexType)
+		indexSupportMmap = vecindexmgr.GetVecIndexMgrInstance().IsMMapSupported(indexType)
 		defaultEnableMmap = params.Params.QueryNodeCfg.MmapVectorIndex.GetAsBool()
 	} else {
 		indexSupportMmap = indexparamcheck.IsScalarMmapIndex(indexType)
@@ -285,7 +290,6 @@ func isDataMmapEnable(fieldSchema *schemapb.FieldSchema) bool {
 	return params.Params.QueryNodeCfg.MmapScalarField.GetAsBool()
 }
 
-func hasRawData(indexInfo *querypb.FieldIndexInfo) bool {
-	log.Warn("hasRawData is not implemented, please check it", zap.Int64("field_id", indexInfo.FieldID))
-	return true
+func isGrowingMmapEnable() bool {
+	return params.Params.QueryNodeCfg.GrowingMmapEnabled.GetAsBool()
 }

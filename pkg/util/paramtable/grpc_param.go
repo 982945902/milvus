@@ -535,3 +535,50 @@ func (p *GrpcClientConfig) GetDefaultRetryPolicy() map[string]interface{} {
 		"backoffMultiplier": p.BackoffMultiplier.GetAsFloat(),
 	}
 }
+
+type InternalTLSConfig struct {
+	InternalTLSEnabled       ParamItem `refreshable:"false"`
+	InternalTLSServerPemPath ParamItem `refreshable:"false"`
+	InternalTLSServerKeyPath ParamItem `refreshable:"false"`
+	InternalTLSCaPemPath     ParamItem `refreshable:"false"`
+	InternalTLSSNI           ParamItem `refreshable:"false"`
+}
+
+func (p *InternalTLSConfig) Init(base *BaseTable) {
+	p.InternalTLSEnabled = ParamItem{
+		Key:          "common.security.internaltlsEnabled",
+		Version:      "2.5.0",
+		DefaultValue: "false",
+		Export:       true,
+	}
+	p.InternalTLSEnabled.Init(base.mgr)
+
+	p.InternalTLSServerPemPath = ParamItem{
+		Key:     "internaltls.serverPemPath",
+		Version: "2.5.0",
+		Export:  true,
+	}
+	p.InternalTLSServerPemPath.Init(base.mgr)
+
+	p.InternalTLSServerKeyPath = ParamItem{
+		Key:     "internaltls.serverKeyPath",
+		Version: "2.5.0",
+		Export:  true,
+	}
+	p.InternalTLSServerKeyPath.Init(base.mgr)
+
+	p.InternalTLSCaPemPath = ParamItem{
+		Key:     "internaltls.caPemPath",
+		Version: "2.5.0",
+		Export:  true,
+	}
+	p.InternalTLSCaPemPath.Init(base.mgr)
+
+	p.InternalTLSSNI = ParamItem{
+		Key:     "internaltls.sni",
+		Version: "2.5.0",
+		Export:  true,
+		Doc:     "The server name indication (SNI) for internal TLS, should be the same as the name provided by the certificates ref: https://en.wikipedia.org/wiki/Server_Name_Indication",
+	}
+	p.InternalTLSSNI.Init(base.mgr)
+}

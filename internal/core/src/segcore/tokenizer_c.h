@@ -24,13 +24,19 @@ extern "C" {
 typedef void* CTokenizer;
 
 CStatus
-create_tokenizer(CMap m, CTokenizer* tokenizer);
+create_tokenizer(const char* params, CTokenizer* tokenizer);
+
+CStatus
+clone_tokenizer(CTokenizer* tokenizer, CTokenizer* rst);
 
 void
 free_tokenizer(CTokenizer tokenizer);
 
 CTokenStream
 create_token_stream(CTokenizer tokenizer, const char* text, uint32_t text_len);
+
+CStatus
+validate_text_schema(const uint8_t* field_schema, uint64_t length);
 
 #ifdef __cplusplus
 }

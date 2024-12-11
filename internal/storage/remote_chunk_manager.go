@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -29,6 +30,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/exp/mmap"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/api/googleapi"
 
 	"github.com/milvus-io/milvus/pkg/log"
 	"github.com/milvus-io/milvus/pkg/metrics"
@@ -38,11 +40,12 @@ import (
 )
 
 const (
-	CloudProviderGCP     = "gcp"
-	CloudProviderAWS     = "aws"
-	CloudProviderAliyun  = "aliyun"
-	CloudProviderAzure   = "azure"
-	CloudProviderTencent = "tencent"
+	CloudProviderGCP       = "gcp"
+	CloudProviderGCPNative = "gcpnative"
+	CloudProviderAWS       = "aws"
+	CloudProviderAliyun    = "aliyun"
+	CloudProviderAzure     = "azure"
+	CloudProviderTencent   = "tencent"
 )
 
 // ChunkObjectWalkFunc is the callback function for walking objects.
@@ -78,6 +81,8 @@ func NewRemoteChunkManager(ctx context.Context, c *config) (*RemoteChunkManager,
 	var err error
 	if c.cloudProvider == CloudProviderAzure {
 		client, err = newAzureObjectStorageWithConfig(ctx, c)
+	} else if c.cloudProvider == CloudProviderGCPNative {
+		client, err = newGcpNativeObjectStorageWithConfig(ctx, c)
 	} else {
 		client, err = newMinioObjectStorageWithConfig(ctx, c)
 	}
@@ -333,7 +338,11 @@ func (mcm *RemoteChunkManager) getObject(ctx context.Context, bucketName, object
 	if err == nil && reader != nil {
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataGetLabel, metrics.SuccessLabel).Inc()
 	} else {
-		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataGetLabel, metrics.FailLabel).Inc()
+		if errors.Is(err, context.Canceled) {
+			metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataGetLabel, metrics.CancelLabel).Inc()
+		} else {
+			metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataGetLabel, metrics.FailLabel).Inc()
+		}
 	}
 
 	return reader, err
@@ -349,7 +358,11 @@ func (mcm *RemoteChunkManager) putObject(ctx context.Context, bucketName, object
 			Observe(float64(start.ElapseSpan().Milliseconds()))
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.SuccessLabel).Inc()
 	} else {
-		metrics.PersistentDataOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.FailLabel).Inc()
+		if errors.Is(err, context.Canceled) {
+			metrics.PersistentDataOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.CancelLabel).Inc()
+		} else {
+			metrics.PersistentDataOpCounter.WithLabelValues(metrics.MetaPutLabel, metrics.FailLabel).Inc()
+		}
 	}
 
 	return err
@@ -365,7 +378,11 @@ func (mcm *RemoteChunkManager) getObjectSize(ctx context.Context, bucketName, ob
 			Observe(float64(start.ElapseSpan().Milliseconds()))
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataStatLabel, metrics.SuccessLabel).Inc()
 	} else {
-		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataStatLabel, metrics.FailLabel).Inc()
+		if errors.Is(err, context.Canceled) {
+			metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataStatLabel, metrics.CancelLabel).Inc()
+		} else {
+			metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataStatLabel, metrics.FailLabel).Inc()
+		}
 	}
 
 	return info, err
@@ -381,7 +398,11 @@ func (mcm *RemoteChunkManager) removeObject(ctx context.Context, bucketName, obj
 			Observe(float64(start.ElapseSpan().Milliseconds()))
 		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataRemoveLabel, metrics.SuccessLabel).Inc()
 	} else {
-		metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataRemoveLabel, metrics.FailLabel).Inc()
+		if errors.Is(err, context.Canceled) {
+			metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataRemoveLabel, metrics.CancelLabel).Inc()
+		} else {
+			metrics.PersistentDataOpCounter.WithLabelValues(metrics.DataRemoveLabel, metrics.FailLabel).Inc()
+		}
 	}
 
 	return err
@@ -400,6 +421,11 @@ func checkObjectStorageError(fileName string, err error) error {
 		return merr.WrapErrIoFailed(fileName, err)
 	case minio.ErrorResponse:
 		if err.Code == "NoSuchKey" {
+			return merr.WrapErrIoKeyNotFound(fileName, err.Error())
+		}
+		return merr.WrapErrIoFailed(fileName, err)
+	case *googleapi.Error:
+		if err.Code == http.StatusNotFound {
 			return merr.WrapErrIoKeyNotFound(fileName, err.Error())
 		}
 		return merr.WrapErrIoFailed(fileName, err)

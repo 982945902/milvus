@@ -29,6 +29,8 @@ import (
 	"github.com/samber/lo"
 	uatomic "go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/exp/maps"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
@@ -120,7 +122,7 @@ func NewMqMsgStream(ctx context.Context,
 }
 
 // AsProducer create producer to send message to channels
-func (ms *mqMsgStream) AsProducer(channels []string) {
+func (ms *mqMsgStream) AsProducer(ctx context.Context, channels []string) {
 	for _, channel := range channels {
 		if len(channel) == 0 {
 			log.Error("MsgStream asProducer's channel is an empty string")
@@ -128,7 +130,7 @@ func (ms *mqMsgStream) AsProducer(channels []string) {
 		}
 
 		fn := func() error {
-			pp, err := ms.client.CreateProducer(common.ProducerOptions{Topic: channel, EnableCompression: true})
+			pp, err := ms.client.CreateProducer(ctx, common.ProducerOptions{Topic: channel, EnableCompression: true})
 			if err != nil {
 				return err
 			}
@@ -175,7 +177,7 @@ func (ms *mqMsgStream) AsConsumer(ctx context.Context, channels []string, subNam
 			continue
 		}
 		fn := func() error {
-			pc, err := ms.client.Subscribe(mqwrapper.ConsumerOptions{
+			pc, err := ms.client.Subscribe(ctx, mqwrapper.ConsumerOptions{
 				Topic:                       channel,
 				SubscriptionName:            subName,
 				SubscriptionInitialPosition: position,
@@ -272,7 +274,7 @@ func (ms *mqMsgStream) isEnabledProduce() bool {
 	return ms.enableProduce.Load().(bool)
 }
 
-func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
+func (ms *mqMsgStream) Produce(ctx context.Context, msgPack *MsgPack) error {
 	if !ms.isEnabledProduce() {
 		log.Warn("can't produce the msg in the backup instance", zap.Stack("stack"))
 		return merr.ErrDenyProduceMsg
@@ -304,40 +306,52 @@ func (ms *mqMsgStream) Produce(msgPack *MsgPack) error {
 	if err != nil {
 		return err
 	}
+	eg, _ := errgroup.WithContext(context.Background())
 	for k, v := range result {
-		channel := ms.producerChannels[k]
-		for i := 0; i < len(v.Msgs); i++ {
-			spanCtx, sp := MsgSpanFromCtx(v.Msgs[i].TraceCtx(), v.Msgs[i])
-			defer sp.End()
-
-			mb, err := v.Msgs[i].Marshal(v.Msgs[i])
-			if err != nil {
-				return err
-			}
-
-			m, err := convertToByteArray(mb)
-			if err != nil {
-				return err
-			}
-
-			msg := &common.ProducerMessage{Payload: m, Properties: map[string]string{}}
-			InjectCtx(spanCtx, msg.Properties)
-
+		k := k
+		v := v
+		eg.Go(func() error {
 			ms.producerLock.RLock()
-			if _, err := ms.producers[channel].Send(spanCtx, msg); err != nil {
-				ms.producerLock.RUnlock()
-				sp.RecordError(err)
-				return err
-			}
+			channel := ms.producerChannels[k]
+			producer, ok := ms.producers[channel]
 			ms.producerLock.RUnlock()
-		}
+			if !ok {
+				return errors.New("producer not found for channel: " + channel)
+			}
+
+			for i := 0; i < len(v.Msgs); i++ {
+				spanCtx, sp := MsgSpanFromCtx(v.Msgs[i].TraceCtx(), v.Msgs[i])
+				defer sp.End()
+
+				mb, err := v.Msgs[i].Marshal(v.Msgs[i])
+				if err != nil {
+					return err
+				}
+
+				m, err := convertToByteArray(mb)
+				if err != nil {
+					return err
+				}
+
+				msg := &common.ProducerMessage{Payload: m, Properties: map[string]string{
+					common.MsgTypeKey: v.Msgs[i].Type().String(),
+				}}
+				InjectCtx(spanCtx, msg.Properties)
+
+				if _, err := producer.Send(spanCtx, msg); err != nil {
+					sp.RecordError(err)
+					return err
+				}
+			}
+			return nil
+		})
 	}
-	return nil
+	return eg.Wait()
 }
 
 // BroadcastMark broadcast msg pack to all producers and returns corresponding msg id
 // the returned message id serves as marking
-func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) (map[string][]MessageID, error) {
+func (ms *mqMsgStream) Broadcast(ctx context.Context, msgPack *MsgPack) (map[string][]MessageID, error) {
 	ids := make(map[string][]MessageID)
 	if msgPack == nil || len(msgPack.Msgs) <= 0 {
 		return ids, errors.New("empty msgs")
@@ -366,18 +380,20 @@ func (ms *mqMsgStream) Broadcast(msgPack *MsgPack) (map[string][]MessageID, erro
 		msg := &common.ProducerMessage{Payload: m, Properties: map[string]string{}}
 		InjectCtx(spanCtx, msg.Properties)
 
-		ms.producerLock.Lock()
-		for channel, producer := range ms.producers {
+		ms.producerLock.RLock()
+		// since the element never be removed in ms.producers, so it's safe to clone and iterate producers
+		producers := maps.Clone(ms.producers)
+		ms.producerLock.RUnlock()
+
+		for channel, producer := range producers {
 			id, err := producer.Send(spanCtx, msg)
 			if err != nil {
-				ms.producerLock.Unlock()
 				sp.RecordError(err)
 				sp.End()
 				return ids, err
 			}
 			ids[channel] = append(ids[channel], id)
 		}
-		ms.producerLock.Unlock()
 		sp.End()
 	}
 	return ids, nil
@@ -389,18 +405,11 @@ func (ms *mqMsgStream) getTsMsgFromConsumerMsg(msg common.Message) (TsMsg, error
 
 // GetTsMsgFromConsumerMsg get TsMsg from consumer message
 func GetTsMsgFromConsumerMsg(unmarshalDispatcher UnmarshalDispatcher, msg common.Message) (TsMsg, error) {
-	header := commonpb.MsgHeader{}
-	if msg.Payload() == nil {
-		return nil, fmt.Errorf("failed to unmarshal message header, payload is empty")
-	}
-	err := proto.Unmarshal(msg.Payload(), &header)
+	msgType, err := common.GetMsgType(msg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal message header, err %s", err.Error())
+		return nil, err
 	}
-	if header.Base == nil {
-		return nil, fmt.Errorf("failed to unmarshal message, header is uncomplete")
-	}
-	tsMsg, err := unmarshalDispatcher.Unmarshal(msg.Payload(), header.Base.MsgType)
+	tsMsg, err := unmarshalDispatcher.Unmarshal(msg.Payload(), msgType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal tsMsg, err %s", err.Error())
 	}
@@ -579,7 +588,7 @@ func (ms *MqTtMsgStream) AsConsumer(ctx context.Context, channels []string, subN
 			continue
 		}
 		fn := func() error {
-			pc, err := ms.client.Subscribe(mqwrapper.ConsumerOptions{
+			pc, err := ms.client.Subscribe(ctx, mqwrapper.ConsumerOptions{
 				Topic:                       channel,
 				SubscriptionName:            subName,
 				SubscriptionInitialPosition: position,
@@ -622,7 +631,7 @@ func isDMLMsg(msg TsMsg) bool {
 	return msg.Type() == commonpb.MsgType_Insert || msg.Type() == commonpb.MsgType_Delete
 }
 
-func (ms *MqTtMsgStream) continueBuffering(endTs uint64, size uint64) bool {
+func (ms *MqTtMsgStream) continueBuffering(endTs, size uint64, startTime time.Time) bool {
 	if ms.ctx.Err() != nil {
 		return false
 	}
@@ -639,6 +648,10 @@ func (ms *MqTtMsgStream) continueBuffering(endTs uint64, size uint64) bool {
 
 	// buffer full
 	if size > paramtable.Get().ServiceParam.MQCfg.PursuitBufferSize.GetAsUint64() {
+		return false
+	}
+
+	if time.Since(startTime) > paramtable.Get().ServiceParam.MQCfg.PursuitBufferTime.GetAsDuration(time.Second) {
 		return false
 	}
 
@@ -670,10 +683,12 @@ func (ms *MqTtMsgStream) bufMsgPackToChannel() {
 			// endMsgPositions := make([]*msgpb.MsgPosition, 0)
 			startPositions := make(map[string]*msgpb.MsgPosition)
 			endPositions := make(map[string]*msgpb.MsgPosition)
+			startBufTime := time.Now()
 			var endTs uint64
 			var size uint64
+			var containsDropCollectionMsg bool
 
-			for ms.continueBuffering(endTs, size) {
+			for ms.continueBuffering(endTs, size, startBufTime) && !containsDropCollectionMsg {
 				ms.consumerLock.Lock()
 				// wait all channels get ttMsg
 				for _, consumer := range ms.consumers {
@@ -714,6 +729,10 @@ func (ms *MqTtMsgStream) bufMsgPackToChannel() {
 							timeTickBuf = append(timeTickBuf, v)
 						} else {
 							tempBuffer = append(tempBuffer, v)
+						}
+						// when drop collection, force to exit the buffer loop
+						if v.Type() == commonpb.MsgType_DropCollection {
+							containsDropCollectionMsg = true
 						}
 					}
 					ms.chanMsgBuf[consumer] = tempBuffer
@@ -959,7 +978,8 @@ func (ms *MqTtMsgStream) Seek(ctx context.Context, msgPositions []*MsgPosition, 
 						zap.Int64("source", tsMsg.SourceID()),
 						zap.String("type", tsMsg.Type().String()),
 						zap.Int("size", tsMsg.Size()),
-						zap.Any("position", tsMsg.Position()),
+						zap.Uint64("msgTs", tsMsg.BeginTs()),
+						zap.Uint64("posTs", mp.GetTimestamp()),
 					)
 				}
 			}

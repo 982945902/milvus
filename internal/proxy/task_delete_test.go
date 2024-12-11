@@ -53,7 +53,7 @@ func Test_getPrimaryKeysFromPlan(t *testing.T) {
 
 	t.Run("delete with complex pk expr", func(t *testing.T) {
 		expr := "pk < 4"
-		plan, err := planparserv2.CreateRetrievePlan(schema, expr)
+		plan, err := planparserv2.CreateRetrievePlan(schema, expr, nil)
 		assert.NoError(t, err)
 		isSimple, _, _ := getPrimaryKeysFromPlan(collSchema, plan)
 		assert.False(t, isSimple)
@@ -61,7 +61,7 @@ func Test_getPrimaryKeysFromPlan(t *testing.T) {
 
 	t.Run("delete with no-pk field expr", func(t *testing.T) {
 		expr := "non_pk == 1"
-		plan, err := planparserv2.CreateRetrievePlan(schema, expr)
+		plan, err := planparserv2.CreateRetrievePlan(schema, expr, nil)
 		assert.NoError(t, err)
 		isSimple, _, _ := getPrimaryKeysFromPlan(collSchema, plan)
 		assert.False(t, isSimple)
@@ -69,7 +69,7 @@ func Test_getPrimaryKeysFromPlan(t *testing.T) {
 
 	t.Run("delete with simple term expr", func(t *testing.T) {
 		expr := "pk in [1, 2, 3]"
-		plan, err := planparserv2.CreateRetrievePlan(schema, expr)
+		plan, err := planparserv2.CreateRetrievePlan(schema, expr, nil)
 		assert.NoError(t, err)
 		isSimple, _, rowNum := getPrimaryKeysFromPlan(collSchema, plan)
 		assert.True(t, isSimple)
@@ -78,7 +78,7 @@ func Test_getPrimaryKeysFromPlan(t *testing.T) {
 
 	t.Run("delete failed with simple term expr", func(t *testing.T) {
 		expr := "pk in [1, 2, 3]"
-		plan, err := planparserv2.CreateRetrievePlan(schema, expr)
+		plan, err := planparserv2.CreateRetrievePlan(schema, expr, nil)
 		assert.NoError(t, err)
 		termExpr := plan.Node.(*planpb.PlanNode_Query).Query.Predicates.Expr.(*planpb.Expr_TermExpr)
 		termExpr.TermExpr.ColumnInfo.DataType = -1
@@ -89,7 +89,7 @@ func Test_getPrimaryKeysFromPlan(t *testing.T) {
 
 	t.Run("delete with simple equal expr", func(t *testing.T) {
 		expr := "pk == 1"
-		plan, err := planparserv2.CreateRetrievePlan(schema, expr)
+		plan, err := planparserv2.CreateRetrievePlan(schema, expr, nil)
 		assert.NoError(t, err)
 		isSimple, _, rowNum := getPrimaryKeysFromPlan(collSchema, plan)
 		assert.True(t, isSimple)
@@ -98,7 +98,7 @@ func Test_getPrimaryKeysFromPlan(t *testing.T) {
 
 	t.Run("delete failed with simple equal expr", func(t *testing.T) {
 		expr := "pk == 1"
-		plan, err := planparserv2.CreateRetrievePlan(schema, expr)
+		plan, err := planparserv2.CreateRetrievePlan(schema, expr, nil)
 		assert.NoError(t, err)
 		unaryRangeExpr := plan.Node.(*planpb.PlanNode_Query).Query.Predicates.Expr.(*planpb.Expr_UnaryRangeExpr)
 		unaryRangeExpr.UnaryRangeExpr.ColumnInfo.DataType = -1
@@ -161,7 +161,7 @@ func TestDeleteTask_Execute(t *testing.T) {
 			},
 		}
 
-		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything).Return(nil, errors.New("mock error"))
+		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything, mock.Anything).Return(nil, errors.New("mock error"))
 		assert.Error(t, dt.Execute(context.Background()))
 	})
 
@@ -190,7 +190,7 @@ func TestDeleteTask_Execute(t *testing.T) {
 			primaryKeys: pk,
 		}
 		stream := msgstream.NewMockMsgStream(t)
-		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything).Return(stream, nil)
+		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything, mock.Anything).Return(stream, nil)
 
 		assert.Error(t, dt.Execute(context.Background()))
 	})
@@ -226,8 +226,8 @@ func TestDeleteTask_Execute(t *testing.T) {
 			primaryKeys: pk,
 		}
 		stream := msgstream.NewMockMsgStream(t)
-		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything).Return(stream, nil)
-		stream.EXPECT().Produce(mock.Anything).Return(errors.New("mock error"))
+		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything, mock.Anything).Return(stream, nil)
+		stream.EXPECT().Produce(mock.Anything, mock.Anything).Return(errors.New("mock error"))
 		assert.Error(t, dt.Execute(context.Background()))
 	})
 }
@@ -535,9 +535,9 @@ func TestDeleteRunner_Run(t *testing.T) {
 			},
 		}
 		stream := msgstream.NewMockMsgStream(t)
-		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything).Return(stream, nil)
+		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything, mock.Anything).Return(stream, nil)
 		mockMgr.EXPECT().getChannels(collectionID).Return(channels, nil)
-		stream.EXPECT().Produce(mock.Anything).Return(fmt.Errorf("mock error"))
+		stream.EXPECT().Produce(mock.Anything, mock.Anything).Return(fmt.Errorf("mock error"))
 
 		assert.Error(t, dr.Run(context.Background()))
 		assert.Equal(t, int64(0), dr.result.DeleteCnt)
@@ -644,9 +644,9 @@ func TestDeleteRunner_Run(t *testing.T) {
 			},
 		}
 		stream := msgstream.NewMockMsgStream(t)
-		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything).Return(stream, nil)
+		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything, mock.Anything).Return(stream, nil)
 		mockMgr.EXPECT().getChannels(collectionID).Return(channels, nil)
-		stream.EXPECT().Produce(mock.Anything).Return(nil)
+		stream.EXPECT().Produce(mock.Anything, mock.Anything).Return(nil)
 
 		lb.EXPECT().Execute(mock.Anything, mock.Anything).Call.Return(func(ctx context.Context, workload CollectionWorkLoad) error {
 			return workload.exec(ctx, 1, qn, "")
@@ -768,7 +768,7 @@ func TestDeleteRunner_Run(t *testing.T) {
 			},
 		}
 		stream := msgstream.NewMockMsgStream(t)
-		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything).Return(stream, nil)
+		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything, mock.Anything).Return(stream, nil)
 		mockMgr.EXPECT().getChannels(collectionID).Return(channels, nil)
 		lb.EXPECT().Execute(mock.Anything, mock.Anything).Call.Return(func(ctx context.Context, workload CollectionWorkLoad) error {
 			return workload.exec(ctx, 1, qn, "")
@@ -792,7 +792,7 @@ func TestDeleteRunner_Run(t *testing.T) {
 				server.FinishSend(nil)
 				return client
 			}, nil)
-		stream.EXPECT().Produce(mock.Anything).Return(errors.New("mock error"))
+		stream.EXPECT().Produce(mock.Anything, mock.Anything).Return(errors.New("mock error"))
 
 		assert.Error(t, dr.Run(ctx))
 		assert.Equal(t, int64(0), dr.result.DeleteCnt)
@@ -830,7 +830,7 @@ func TestDeleteRunner_Run(t *testing.T) {
 			},
 		}
 		stream := msgstream.NewMockMsgStream(t)
-		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything).Return(stream, nil)
+		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything, mock.Anything).Return(stream, nil)
 		mockMgr.EXPECT().getChannels(collectionID).Return(channels, nil)
 		lb.EXPECT().Execute(mock.Anything, mock.Anything).Call.Return(func(ctx context.Context, workload CollectionWorkLoad) error {
 			return workload.exec(ctx, 1, qn, "")
@@ -854,7 +854,7 @@ func TestDeleteRunner_Run(t *testing.T) {
 				server.FinishSend(nil)
 				return client
 			}, nil)
-		stream.EXPECT().Produce(mock.Anything).Return(nil)
+		stream.EXPECT().Produce(mock.Anything, mock.Anything).Return(nil)
 
 		assert.NoError(t, dr.Run(ctx))
 		assert.Equal(t, int64(3), dr.result.DeleteCnt)
@@ -911,7 +911,7 @@ func TestDeleteRunner_Run(t *testing.T) {
 			},
 		}
 		stream := msgstream.NewMockMsgStream(t)
-		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything).Return(stream, nil)
+		mockMgr.EXPECT().getOrCreateDmlStream(mock.Anything, mock.Anything).Return(stream, nil)
 		mockMgr.EXPECT().getChannels(collectionID).Return(channels, nil)
 		lb.EXPECT().Execute(mock.Anything, mock.Anything).Call.Return(func(ctx context.Context, workload CollectionWorkLoad) error {
 			return workload.exec(ctx, 1, qn, "")
@@ -936,7 +936,7 @@ func TestDeleteRunner_Run(t *testing.T) {
 				return client
 			}, nil)
 
-		stream.EXPECT().Produce(mock.Anything).Return(nil)
+		stream.EXPECT().Produce(mock.Anything, mock.Anything).Return(nil)
 		assert.NoError(t, dr.Run(ctx))
 		assert.Equal(t, int64(3), dr.result.DeleteCnt)
 	})
@@ -1054,7 +1054,7 @@ func TestDeleteRunner_StreamingQueryAndDelteFunc(t *testing.T) {
 
 		schemaHelper, err := typeutil.CreateSchemaHelper(dr.schema.CollectionSchema)
 		require.NoError(t, err)
-		plan, err := planparserv2.CreateRetrievePlan(schemaHelper, dr.req.Expr)
+		plan, err := planparserv2.CreateRetrievePlan(schemaHelper, dr.req.Expr, nil)
 		assert.NoError(t, err)
 		queryFunc := dr.getStreamingQueryAndDelteFunc(plan)
 		assert.Error(t, queryFunc(ctx, 1, qn, ""))
@@ -1099,7 +1099,7 @@ func TestDeleteRunner_StreamingQueryAndDelteFunc(t *testing.T) {
 
 		schemaHelper, err := typeutil.CreateSchemaHelper(dr.schema.CollectionSchema)
 		require.NoError(t, err)
-		plan, err := planparserv2.CreateRetrievePlan(schemaHelper, dr.req.Expr)
+		plan, err := planparserv2.CreateRetrievePlan(schemaHelper, dr.req.Expr, nil)
 		assert.NoError(t, err)
 		queryFunc := dr.getStreamingQueryAndDelteFunc(plan)
 		assert.Error(t, queryFunc(ctx, 1, qn, ""))

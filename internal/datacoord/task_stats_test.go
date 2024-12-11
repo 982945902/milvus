@@ -67,6 +67,7 @@ func (s *statsTaskSuite) SetupSuite() {
 						NumOfRows:     65535,
 						State:         commonpb.SegmentState_Flushed,
 						MaxRowNum:     65535,
+						Level:         datapb.SegmentLevel_L2,
 					},
 				},
 			},
@@ -82,6 +83,7 @@ func (s *statsTaskSuite) SetupSuite() {
 								NumOfRows:     65535,
 								State:         commonpb.SegmentState_Flushed,
 								MaxRowNum:     65535,
+								Level:         datapb.SegmentLevel_L2,
 							},
 						},
 					},
@@ -97,12 +99,13 @@ func (s *statsTaskSuite) SetupSuite() {
 								NumOfRows:     65535,
 								State:         commonpb.SegmentState_Flushed,
 								MaxRowNum:     65535,
+								Level:         datapb.SegmentLevel_L2,
 							},
 						},
 					},
 				},
 			},
-			compactionTo: map[UniqueID]UniqueID{},
+			compactionTo: map[UniqueID][]UniqueID{},
 		},
 
 		statsTaskMeta: &statsTaskMeta{
@@ -122,25 +125,12 @@ func (s *statsTaskSuite) SetupSuite() {
 					FailReason:    "",
 				},
 			},
-			segmentStatsTaskIndex: map[int64]*indexpb.StatsTask{
-				s.segID: {
-					CollectionID:  1,
-					PartitionID:   2,
-					SegmentID:     s.segID,
-					InsertChannel: "ch1",
-					TaskID:        s.taskID,
-					Version:       0,
-					NodeID:        0,
-					State:         indexpb.JobState_JobStateInit,
-					FailReason:    "",
-				},
-			},
 		},
 	}
 }
 
 func (s *statsTaskSuite) TestTaskStats_PreCheck() {
-	st := newStatsTask(s.taskID, s.segID, s.targetID, nil)
+	st := newStatsTask(s.taskID, s.segID, s.targetID, indexpb.StatsSubJob_Sort)
 
 	s.Equal(s.taskID, st.GetTaskID())
 
@@ -176,21 +166,21 @@ func (s *statsTaskSuite) TestTaskStats_PreCheck() {
 		s.Run("segment is compacting", func() {
 			s.mt.segments.segments[s.segID].isCompacting = true
 
-			s.Error(st.UpdateVersion(context.Background(), s.mt))
+			s.Error(st.UpdateVersion(context.Background(), 1, s.mt))
 		})
 
 		s.Run("normal case", func() {
 			s.mt.segments.segments[s.segID].isCompacting = false
 
 			catalog.EXPECT().SaveStatsTask(mock.Anything, mock.Anything).Return(nil).Once()
-			s.NoError(st.UpdateVersion(context.Background(), s.mt))
+			s.NoError(st.UpdateVersion(context.Background(), 1, s.mt))
 		})
 
 		s.Run("failed case", func() {
 			s.mt.segments.segments[s.segID].isCompacting = false
 
 			catalog.EXPECT().SaveStatsTask(mock.Anything, mock.Anything).Return(fmt.Errorf("error")).Once()
-			s.Error(st.UpdateVersion(context.Background(), s.mt))
+			s.Error(st.UpdateVersion(context.Background(), 1, s.mt))
 		})
 	})
 
@@ -200,12 +190,12 @@ func (s *statsTaskSuite) TestTaskStats_PreCheck() {
 
 		s.Run("normal case", func() {
 			catalog.EXPECT().SaveStatsTask(mock.Anything, mock.Anything).Return(nil).Once()
-			s.NoError(st.UpdateMetaBuildingState(1, s.mt))
+			s.NoError(st.UpdateMetaBuildingState(s.mt))
 		})
 
 		s.Run("update error", func() {
 			catalog.EXPECT().SaveStatsTask(mock.Anything, mock.Anything).Return(fmt.Errorf("error")).Once()
-			s.Error(st.UpdateMetaBuildingState(1, s.mt))
+			s.Error(st.UpdateMetaBuildingState(s.mt))
 		})
 	})
 
@@ -421,7 +411,6 @@ func (s *statsTaskSuite) TestTaskStats_PreCheck() {
 								Channel:       "ch1",
 								InsertLogs:    nil,
 								StatsLogs:     nil,
-								DeltaLogs:     nil,
 								TextStatsLogs: nil,
 								NumRows:       65535,
 							},
@@ -557,14 +546,18 @@ func (s *statsTaskSuite) TestTaskStats_PreCheck() {
 
 		s.Run("normal case", func() {
 			catalog := catalogmocks.NewDataCoordCatalog(s.T())
+			catalog.EXPECT().AlterSegments(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 			s.mt.catalog = catalog
 			s.mt.statsTaskMeta.catalog = catalog
-			catalog.EXPECT().AlterSegments(mock.Anything, mock.Anything, mock.Anything).Return(nil)
+			updateStateOp := UpdateStatusOperator(s.segID, commonpb.SegmentState_Flushed)
+			err := s.mt.UpdateSegmentsInfo(context.TODO(), updateStateOp)
+			s.NoError(err)
 			catalog.EXPECT().SaveStatsTask(mock.Anything, mock.Anything).Return(nil)
 
 			s.NoError(st.SetJobInfo(s.mt))
-			s.NotNil(s.mt.GetHealthySegment(s.segID + 1))
+			s.NotNil(s.mt.GetHealthySegment(context.TODO(), s.targetID))
 			s.Equal(indexpb.JobState_JobStateFinished, s.mt.statsTaskMeta.tasks[s.taskID].GetState())
+			s.Equal(datapb.SegmentLevel_L2, s.mt.GetHealthySegment(context.TODO(), s.targetID).GetLevel())
 		})
 	})
 }

@@ -35,10 +35,12 @@ import (
 	"github.com/milvus-io/milvus/internal/flushcommon/broker"
 	"github.com/milvus-io/milvus/internal/flushcommon/metacache"
 	"github.com/milvus-io/milvus/internal/flushcommon/metacache/pkoracle"
+	"github.com/milvus-io/milvus/internal/json"
 	"github.com/milvus-io/milvus/internal/mocks"
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/common"
+	"github.com/milvus-io/milvus/pkg/util/metricsinfo"
 	"github.com/milvus-io/milvus/pkg/util/paramtable"
 	"github.com/milvus-io/milvus/pkg/util/retry"
 	"github.com/milvus-io/milvus/pkg/util/tsoutil"
@@ -185,7 +187,7 @@ func (s *SyncTaskSuite) TestRunNormal() {
 	}
 
 	bfs.UpdatePKRange(fd)
-	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{}, bfs)
+	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{}, bfs, nil)
 	metacache.UpdateNumOfRows(1000)(seg)
 	seg.GetBloomFilterSet().Roll()
 	s.metacache.EXPECT().GetSegmentByID(s.segmentID).Return(seg, true)
@@ -273,7 +275,7 @@ func (s *SyncTaskSuite) TestRunL0Segment() {
 	defer cancel()
 	s.broker.EXPECT().SaveBinlogPaths(mock.Anything, mock.Anything).Return(nil)
 	bfs := pkoracle.NewBloomFilterSet()
-	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{Level: datapb.SegmentLevel_L0}, bfs)
+	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{Level: datapb.SegmentLevel_L0}, bfs, nil)
 	s.metacache.EXPECT().GetSegmentByID(s.segmentID).Return(seg, true)
 	s.metacache.EXPECT().GetSegmentsBy(mock.Anything, mock.Anything).Return([]*metacache.SegmentInfo{seg})
 	s.metacache.EXPECT().UpdateSegments(mock.Anything, mock.Anything).Return()
@@ -314,7 +316,7 @@ func (s *SyncTaskSuite) TestRunError() {
 	})
 
 	s.metacache.ExpectedCalls = nil
-	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{}, pkoracle.NewBloomFilterSet())
+	seg := metacache.NewSegmentInfo(&datapb.SegmentInfo{}, pkoracle.NewBloomFilterSet(), nil)
 	metacache.UpdateNumOfRows(1000)(seg)
 	s.metacache.EXPECT().GetSegmentByID(s.segmentID).Return(seg, true)
 	s.metacache.EXPECT().GetSegmentsBy(mock.Anything, mock.Anything).Return([]*metacache.SegmentInfo{seg})
@@ -380,6 +382,38 @@ func (s *SyncTaskSuite) TestNextID() {
 			task.nextID()
 		})
 	})
+}
+
+func (s *SyncTaskSuite) TestSyncTask_MarshalJSON() {
+	t := &SyncTask{
+		segmentID:     12345,
+		batchRows:     100,
+		level:         datapb.SegmentLevel_L0,
+		tsFrom:        1000,
+		tsTo:          2000,
+		deltaRowCount: 10,
+		flushedSize:   1024,
+		execTime:      2 * time.Second,
+	}
+
+	tm := &metricsinfo.SyncTask{
+		SegmentID:     t.segmentID,
+		BatchRows:     t.batchRows,
+		SegmentLevel:  t.level.String(),
+		TSFrom:        tsoutil.PhysicalTimeFormat(t.tsFrom),
+		TSTo:          tsoutil.PhysicalTimeFormat(t.tsTo),
+		DeltaRowCount: t.deltaRowCount,
+		FlushSize:     t.flushedSize,
+		RunningTime:   t.execTime.String(),
+		NodeID:        paramtable.GetNodeID(),
+	}
+	expectedBytes, err := json.Marshal(tm)
+	s.NoError(err)
+	expectedJSON := string(expectedBytes)
+
+	data, err := t.MarshalJSON()
+	s.NoError(err)
+	s.JSONEq(expectedJSON, string(data))
 }
 
 func TestSyncTask(t *testing.T) {

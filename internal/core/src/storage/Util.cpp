@@ -29,6 +29,9 @@
 #ifdef AZURE_BUILD_DIR
 #include "storage/azure/AzureChunkManager.h"
 #endif
+#ifdef ENABLE_GCP_NATIVE
+#include "storage/gcp-native-storage/GcpNativeChunkManager.h"
+#endif
 #include "storage/ChunkManager.h"
 #include "storage/DiskFileManagerImpl.h"
 #include "storage/InsertData.h"
@@ -59,6 +62,7 @@ enum class CloudProviderType : int8_t {
     ALIYUN = 3,
     AZURE = 4,
     TENCENTCLOUD = 5,
+    GCPNATIVE = 6,
 };
 
 std::map<std::string, CloudProviderType> CloudProviderType_Map = {
@@ -66,7 +70,8 @@ std::map<std::string, CloudProviderType> CloudProviderType_Map = {
     {"gcp", CloudProviderType::GCP},
     {"aliyun", CloudProviderType::ALIYUN},
     {"azure", CloudProviderType::AZURE},
-    {"tencent", CloudProviderType::TENCENTCLOUD}};
+    {"tencent", CloudProviderType::TENCENTCLOUD},
+    {"gcpnative", CloudProviderType::GCPNATIVE}};
 
 std::map<std::string, int> ReadAheadPolicy_Map = {
     {"normal", MADV_NORMAL},
@@ -484,41 +489,77 @@ GenIndexPathIdentifier(int64_t build_id, int64_t index_version) {
 }
 
 std::string
+GenTextIndexPathIdentifier(int64_t build_id,
+                           int64_t index_version,
+                           int64_t segment_id,
+                           int64_t field_id) {
+    return std::to_string(build_id) + "/" + std::to_string(index_version) +
+           "/" + std::to_string(segment_id) + "/" + std::to_string(field_id) +
+           "/";
+}
+
+std::string
 GenIndexPathPrefix(ChunkManagerPtr cm,
                    int64_t build_id,
                    int64_t index_version) {
-    return cm->GetRootPath() + "/" + std::string(INDEX_ROOT_PATH) + "/" +
-           GenIndexPathIdentifier(build_id, index_version);
+    boost::filesystem::path prefix = cm->GetRootPath();
+    boost::filesystem::path path = std::string(INDEX_ROOT_PATH);
+    boost::filesystem::path path1 =
+        GenIndexPathIdentifier(build_id, index_version);
+    return (prefix / path / path1).string();
+}
+
+std::string
+GenTextIndexPathPrefix(ChunkManagerPtr cm,
+                       int64_t build_id,
+                       int64_t index_version,
+                       int64_t segment_id,
+                       int64_t field_id) {
+    boost::filesystem::path prefix = cm->GetRootPath();
+    boost::filesystem::path path = std::string(TEXT_LOG_ROOT_PATH);
+    boost::filesystem::path path1 = GenTextIndexPathIdentifier(
+        build_id, index_version, segment_id, field_id);
+    return (prefix / path / path1).string();
 }
 
 std::string
 GetIndexPathPrefixWithBuildID(ChunkManagerPtr cm, int64_t build_id) {
-    return cm->GetRootPath() + "/" + std::string(INDEX_ROOT_PATH) + "/" +
-           std::to_string(build_id);
+    boost::filesystem::path prefix = cm->GetRootPath();
+    boost::filesystem::path path = std::string(INDEX_ROOT_PATH);
+    boost::filesystem::path path1 = std::to_string(build_id);
+    return (prefix / path / path1).string();
 }
 
 std::string
 GenFieldRawDataPathPrefix(ChunkManagerPtr cm,
                           int64_t segment_id,
                           int64_t field_id) {
-    return cm->GetRootPath() + "/" + std::string(RAWDATA_ROOT_PATH) + "/" +
-           std::to_string(segment_id) + "/" + std::to_string(field_id) + "/";
+    boost::filesystem::path prefix = cm->GetRootPath();
+    boost::filesystem::path path = std::string(RAWDATA_ROOT_PATH);
+    boost::filesystem::path path1 =
+        std::to_string(segment_id) + "/" + std::to_string(field_id) + "/";
+    return (prefix / path / path1).string();
 }
 
 std::string
 GetSegmentRawDataPathPrefix(ChunkManagerPtr cm, int64_t segment_id) {
-    return cm->GetRootPath() + "/" + std::string(RAWDATA_ROOT_PATH) + "/" +
-           std::to_string(segment_id);
+    boost::filesystem::path prefix = cm->GetRootPath();
+    boost::filesystem::path path = std::string(RAWDATA_ROOT_PATH);
+    boost::filesystem::path path1 = std::to_string(segment_id);
+    return (prefix / path / path1).string();
 }
 
 std::unique_ptr<DataCodec>
 DownloadAndDecodeRemoteFile(ChunkManager* chunk_manager,
-                            const std::string& file) {
+                            const std::string& file,
+                            bool is_field_data) {
     auto fileSize = chunk_manager->Size(file);
     auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[fileSize]);
     chunk_manager->Read(file, buf.get(), fileSize);
 
-    return DeserializeFileData(buf, fileSize);
+    auto res = DeserializeFileData(buf, fileSize, is_field_data);
+    res->SetData(buf);
+    return res;
 }
 
 std::pair<std::string, size_t>
@@ -573,7 +614,7 @@ GetObjectData(ChunkManager* remote_chunk_manager,
     futures.reserve(remote_files.size());
     for (auto& file : remote_files) {
         futures.emplace_back(pool.Submit(
-            DownloadAndDecodeRemoteFile, remote_chunk_manager, file));
+            DownloadAndDecodeRemoteFile, remote_chunk_manager, file, true));
     }
     return futures;
 }
@@ -691,6 +732,12 @@ CreateChunkManager(const StorageConfig& storage_config) {
 #ifdef AZURE_BUILD_DIR
                 case CloudProviderType::AZURE: {
                     return std::make_shared<AzureChunkManager>(storage_config);
+                }
+#endif
+#ifdef ENABLE_GCP_NATIVE
+                case CloudProviderType::GCPNATIVE: {
+                    return std::make_shared<GcpNativeChunkManager>(
+                        storage_config);
                 }
 #endif
                 default: {

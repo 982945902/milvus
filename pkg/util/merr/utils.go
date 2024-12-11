@@ -323,7 +323,6 @@ func WrapErrAsInputErrorWhen(err error, targets ...milvusError) error {
 			if target.errCode == merr.errCode {
 				log.Info("mark error as input error", zap.Error(err))
 				WithErrorType(InputError)(&merr)
-				log.Info("test--", zap.String("type", merr.errType.String()))
 				return merr
 			}
 		}
@@ -455,6 +454,14 @@ func WrapErrDatabaseNumLimitExceeded(limit int, msg ...string) error {
 
 func WrapErrDatabaseNameInvalid(database any, msg ...string) error {
 	err := wrapFields(ErrDatabaseInvalidName, value("database", database))
+	if len(msg) > 0 {
+		err = errors.Wrap(err, strings.Join(msg, "->"))
+	}
+	return err
+}
+
+func WrapErrPrivilegeGroupNameInvalid(privilegeGroup any, msg ...string) error {
+	err := wrapFields(ErrPrivilegeGroupInvalidName, value("privilegeGroup", privilegeGroup))
 	if len(msg) > 0 {
 		err = errors.Wrap(err, strings.Join(msg, "->"))
 	}
@@ -778,8 +785,8 @@ func WrapErrIndexNotFound(indexName string, msg ...string) error {
 	return err
 }
 
-func WrapErrIndexNotFoundForSegment(segmentID int64, msg ...string) error {
-	err := wrapFields(ErrIndexNotFound, value("segmentID", segmentID))
+func WrapErrIndexNotFoundForSegments(segmentIDs []int64, msg ...string) error {
+	err := wrapFields(ErrIndexNotFound, value("segmentIDs", segmentIDs))
 	if len(msg) > 0 {
 		err = errors.Wrap(err, strings.Join(msg, "->"))
 	}

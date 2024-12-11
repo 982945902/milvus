@@ -262,6 +262,10 @@ func (m *GrpcRootCoordClient) AlterCollection(ctx context.Context, in *milvuspb.
 	return &commonpb.Status{}, m.Err
 }
 
+func (m *GrpcRootCoordClient) AlterCollectionField(ctx context.Context, in *milvuspb.AlterCollectionFieldRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return &commonpb.Status{}, m.Err
+}
+
 func (m *GrpcRootCoordClient) AlterDatabase(ctx context.Context, in *rootcoordpb.AlterDatabaseRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	return &commonpb.Status{}, m.Err
 }
@@ -271,6 +275,22 @@ func (m *GrpcRootCoordClient) BackupRBAC(ctx context.Context, in *milvuspb.Backu
 }
 
 func (m *GrpcRootCoordClient) RestoreRBAC(ctx context.Context, in *milvuspb.RestoreRBACMetaRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return &commonpb.Status{}, m.Err
+}
+
+func (m *GrpcRootCoordClient) CreatePrivilegeGroup(ctx context.Context, in *milvuspb.CreatePrivilegeGroupRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return &commonpb.Status{}, m.Err
+}
+
+func (m *GrpcRootCoordClient) DropPrivilegeGroup(ctx context.Context, in *milvuspb.DropPrivilegeGroupRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
+	return &commonpb.Status{}, m.Err
+}
+
+func (m *GrpcRootCoordClient) ListPrivilegeGroups(ctx context.Context, in *milvuspb.ListPrivilegeGroupsRequest, opts ...grpc.CallOption) (*milvuspb.ListPrivilegeGroupsResponse, error) {
+	return &milvuspb.ListPrivilegeGroupsResponse{}, m.Err
+}
+
+func (m *GrpcRootCoordClient) OperatePrivilegeGroup(ctx context.Context, in *milvuspb.OperatePrivilegeGroupRequest, opts ...grpc.CallOption) (*commonpb.Status, error) {
 	return &commonpb.Status{}, m.Err
 }
 

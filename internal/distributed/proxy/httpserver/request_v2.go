@@ -1,3 +1,19 @@
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License. You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package httpserver
 
 import (
@@ -9,11 +25,28 @@ import (
 	"github.com/milvus-io/milvus/pkg/util/merr"
 )
 
+type EmptyReq struct{}
+
+func (req *EmptyReq) GetDbName() string { return "" }
+
 type DatabaseReq struct {
 	DbName string `json:"dbName"`
 }
 
 func (req *DatabaseReq) GetDbName() string { return req.DbName }
+
+type DatabaseReqRequiredName struct {
+	DbName string `json:"dbName" binding:"required"`
+}
+
+func (req *DatabaseReqRequiredName) GetDbName() string { return req.DbName }
+
+type DatabaseReqWithProperties struct {
+	DbName     string                 `json:"dbName" binding:"required"`
+	Properties map[string]interface{} `json:"properties"`
+}
+
+func (req *DatabaseReqWithProperties) GetDbName() string { return req.DbName }
 
 type CollectionNameReq struct {
 	DbName         string   `json:"dbName"`
@@ -101,13 +134,14 @@ type JobIDReq struct {
 func (req *JobIDReq) GetJobID() string { return req.JobID }
 
 type QueryReqV2 struct {
-	DbName         string   `json:"dbName"`
-	CollectionName string   `json:"collectionName" binding:"required"`
-	PartitionNames []string `json:"partitionNames"`
-	OutputFields   []string `json:"outputFields"`
-	Filter         string   `json:"filter"`
-	Limit          int32    `json:"limit"`
-	Offset         int32    `json:"offset"`
+	DbName         string                 `json:"dbName"`
+	CollectionName string                 `json:"collectionName" binding:"required"`
+	PartitionNames []string               `json:"partitionNames"`
+	OutputFields   []string               `json:"outputFields"`
+	Filter         string                 `json:"filter"`
+	Limit          int32                  `json:"limit"`
+	Offset         int32                  `json:"offset"`
+	ExprParams     map[string]interface{} `json:"exprParams"`
 }
 
 func (req *QueryReqV2) GetDbName() string { return req.DbName }
@@ -124,10 +158,11 @@ type CollectionIDReq struct {
 func (req *CollectionIDReq) GetDbName() string { return req.DbName }
 
 type CollectionFilterReq struct {
-	DbName         string `json:"dbName"`
-	CollectionName string `json:"collectionName" binding:"required"`
-	PartitionName  string `json:"partitionName"`
-	Filter         string `json:"filter" binding:"required"`
+	DbName         string                 `json:"dbName"`
+	CollectionName string                 `json:"collectionName" binding:"required"`
+	PartitionName  string                 `json:"partitionName"`
+	Filter         string                 `json:"filter" binding:"required"`
+	ExprParams     map[string]interface{} `json:"exprParams"`
 }
 
 func (req *CollectionFilterReq) GetDbName() string { return req.DbName }
@@ -141,18 +176,32 @@ type CollectionDataReq struct {
 
 func (req *CollectionDataReq) GetDbName() string { return req.DbName }
 
+type searchParams struct {
+	// not use metricType any more, just for compatibility
+	MetricType    string                 `json:"metricType"`
+	Params        map[string]interface{} `json:"params"`
+	IgnoreGrowing bool                   `json:"ignoreGrowing"`
+	Hints         string                 `json:"hints"`
+}
+
 type SearchReqV2 struct {
-	DbName         string             `json:"dbName"`
-	CollectionName string             `json:"collectionName" binding:"required"`
-	Data           []interface{}      `json:"data" binding:"required"`
-	AnnsField      string             `json:"annsField"`
-	PartitionNames []string           `json:"partitionNames"`
-	Filter         string             `json:"filter"`
-	GroupByField   string             `json:"groupingField"`
-	Limit          int32              `json:"limit"`
-	Offset         int32              `json:"offset"`
-	OutputFields   []string           `json:"outputFields"`
-	Params         map[string]float64 `json:"params"`
+	DbName           string                 `json:"dbName"`
+	CollectionName   string                 `json:"collectionName" binding:"required"`
+	Data             []interface{}          `json:"data" binding:"required"`
+	AnnsField        string                 `json:"annsField"`
+	PartitionNames   []string               `json:"partitionNames"`
+	Filter           string                 `json:"filter"`
+	GroupByField     string                 `json:"groupingField"`
+	GroupSize        int32                  `json:"groupSize"`
+	StrictGroupSize  bool                   `json:"strictGroupSize"`
+	Limit            int32                  `json:"limit"`
+	Offset           int32                  `json:"offset"`
+	OutputFields     []string               `json:"outputFields"`
+	SearchParams     searchParams           `json:"searchParams"`
+	ConsistencyLevel string                 `json:"consistencyLevel"`
+	ExprParams       map[string]interface{} `json:"exprParams"`
+	// not use Params any more, just for compatibility
+	Params map[string]float64 `json:"params"`
 }
 
 func (req *SearchReqV2) GetDbName() string { return req.DbName }
@@ -163,25 +212,29 @@ type Rand struct {
 }
 
 type SubSearchReq struct {
-	Data          []interface{}      `json:"data" binding:"required"`
-	AnnsField     string             `json:"annsField"`
-	Filter        string             `json:"filter"`
-	GroupByField  string             `json:"groupingField"`
-	MetricType    string             `json:"metricType"`
-	Limit         int32              `json:"limit"`
-	Offset        int32              `json:"offset"`
-	IgnoreGrowing bool               `json:"ignoreGrowing"`
-	Params        map[string]float64 `json:"params"`
+	Data         []interface{}          `json:"data" binding:"required"`
+	AnnsField    string                 `json:"annsField"`
+	Filter       string                 `json:"filter"`
+	GroupByField string                 `json:"groupingField"`
+	MetricType   string                 `json:"metricType"`
+	Limit        int32                  `json:"limit"`
+	Offset       int32                  `json:"offset"`
+	SearchParams searchParams           `json:"params"`
+	ExprParams   map[string]interface{} `json:"exprParams"`
 }
 
 type HybridSearchReq struct {
-	DbName         string         `json:"dbName"`
-	CollectionName string         `json:"collectionName" binding:"required"`
-	PartitionNames []string       `json:"partitionNames"`
-	Search         []SubSearchReq `json:"search"`
-	Rerank         Rand           `json:"rerank"`
-	Limit          int32          `json:"limit"`
-	OutputFields   []string       `json:"outputFields"`
+	DbName           string         `json:"dbName"`
+	CollectionName   string         `json:"collectionName" binding:"required"`
+	PartitionNames   []string       `json:"partitionNames"`
+	Search           []SubSearchReq `json:"search"`
+	Rerank           Rand           `json:"rerank"`
+	Limit            int32          `json:"limit"`
+	GroupByField     string         `json:"groupingField"`
+	GroupSize        int32          `json:"groupSize"`
+	StrictGroupSize  bool           `json:"strictGroupSize"`
+	OutputFields     []string       `json:"outputFields"`
+	ConsistencyLevel string         `json:"consistencyLevel"`
 }
 
 func (req *HybridSearchReq) GetDbName() string { return req.DbName }
@@ -258,6 +311,18 @@ func (req *RoleReq) GetRoleName() string {
 	return req.RoleName
 }
 
+type PrivilegeGroupReq struct {
+	PrivilegeGroupName string   `json:"privilegeGroupName" binding:"required"`
+	Privileges         []string `json:"privileges"`
+}
+
+type GrantV2Req struct {
+	RoleName       string `json:"roleName" binding:"required"`
+	DbName         string `json:"dbName"`
+	CollectionName string `json:"collectionName"`
+	Privilege      string `json:"privilege" binding:"required"`
+}
+
 type GrantReq struct {
 	RoleName   string `json:"roleName" binding:"required"`
 	ObjectType string `json:"objectType" binding:"required"`
@@ -270,8 +335,9 @@ func (req *GrantReq) GetDbName() string { return req.DbName }
 
 type IndexParam struct {
 	FieldName  string                 `json:"fieldName" binding:"required"`
-	IndexName  string                 `json:"indexName" binding:"required"`
-	MetricType string                 `json:"metricType" binding:"required"`
+	IndexName  string                 `json:"indexName"`
+	MetricType string                 `json:"metricType"`
+	IndexType  string                 `json:"indexType"`
 	Params     map[string]interface{} `json:"params"`
 }
 
@@ -304,13 +370,26 @@ type FieldSchema struct {
 	ElementDataType   string                 `json:"elementDataType"`
 	IsPrimary         bool                   `json:"isPrimary"`
 	IsPartitionKey    bool                   `json:"isPartitionKey"`
+	IsClusteringKey   bool                   `json:"isClusteringKey"`
 	ElementTypeParams map[string]interface{} `json:"elementTypeParams" binding:"required"`
+	Nullable          bool                   `json:"nullable" binding:"required"`
+	DefaultValue      interface{}            `json:"defaultValue" binding:"required"`
+}
+
+type FunctionSchema struct {
+	FunctionName     string                 `json:"name" binding:"required"`
+	Description      string                 `json:"description"`
+	FunctionType     string                 `json:"type" binding:"required"`
+	InputFieldNames  []string               `json:"inputFieldNames" binding:"required"`
+	OutputFieldNames []string               `json:"outputFieldNames" binding:"required"`
+	Params           map[string]interface{} `json:"params"`
 }
 
 type CollectionSchema struct {
-	Fields             []FieldSchema `json:"fields"`
-	AutoId             bool          `json:"autoID"`
-	EnableDynamicField bool          `json:"enableDynamicField"`
+	Fields             []FieldSchema    `json:"fields"`
+	Functions          []FunctionSchema `json:"functions"`
+	AutoId             bool             `json:"autoID"`
+	EnableDynamicField bool             `json:"enableDynamicField"`
 }
 
 type CollectionReq struct {
